@@ -60,6 +60,14 @@ Modular: Easy to add new formats, color spaces, and operations
 Type-Safe: Leverages Zig's compile-time safety
 Tested: All features validated with working examples
 Extensible: Stubs in place for JPEG, WebP, AVIF, TIFF, GIF, SVG
+Documentation: ✅ Complete MVP documentation created
+- docs/index.md: Main documentation index
+- docs/getting-started.md: Installation and usage guide
+- docs/api-reference.md: Complete API documentation
+- docs/contributing.md: Developer contribution guide
+- docs/changelog.md: Version history and roadmap
+- docs/examples.md: Practical code examples
+- docs/architecture.md: Internal design documentation
 The library now provides a robust alternative to C image libraries for core functionality. JPEG implementation remains as the major outstanding item (complex DCT/Huffman decoding), but the foundation is solid for adding it or other advanced formats. All operations work across supported color spaces, and the API is clean and memory-safe.
 
 Would you like me to tackle JPEG implementation next, or focus on any specific format/operation?
