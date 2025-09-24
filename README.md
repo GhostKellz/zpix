@@ -29,6 +29,14 @@
 
 **zpix** is a high-performance, memory-safe image processing library written in [Zig](https://ziglang.org/). It serves as a modern replacement for C libraries like FreeImage, DevIL, SOIL, and stb_image, providing comprehensive image loading, processing, and saving capabilities with zero-cost abstractions and compile-time safety.
 
+## ⚠️ DISCLAIMER
+
+⚠️ **EXPERIMENTAL LIBRARY - FOR LAB/PERSONAL USE** ⚠️
+
+This is an experimental library under active development. It is
+intended for research, learning, and personal projects. The API is subject
+to change!
+
 ## ✨ Features
 
 - **🛡️ Memory Safety**: Zero-copy operations where possible, controlled allocations, bounds checking
