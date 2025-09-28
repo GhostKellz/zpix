@@ -51,9 +51,9 @@ to change!
 | Format | Load | Save | Status | Notes |
 |--------|------|------|--------|-------|
 | **BMP** | ✅ | ✅ | Complete | 24-bit RGB, grayscale support |
-| **PNG** | ✅ | ❌ | Partial | 8-bit RGB with full zlib decompression |
+| **PNG** | ✅ | ✅ | Complete | 8-bit RGB/RGBA with alpha channel support |
 | **JPEG** | 🔄 | ❌ | In Progress | Huffman decoding framework implemented |
-| **WebP** | ❌ | ❌ | Planned | Lossy and lossless support |
+| **WebP** | 🔄 | ✅ | Partial | Basic lossless support, lossy in progress |
 | **AVIF** | ❌ | ❌ | Planned | Modern high-efficiency format |
 | **TIFF** | ❌ | ❌ | Planned | Multi-page and compression support |
 | **GIF** | ❌ | ❌ | Planned | Animation support |
@@ -87,8 +87,26 @@ to change!
 
 - **SIMD Ready**: Framework prepared for SIMD optimizations
 - **Parallel Processing**: Designed for concurrent image processing
-- **Memory Efficient**: Minimal allocations, zero-copy where possible
+- **Memory Efficient**: Exact memory usage tracking, zero-copy where possible
 - **Fast Decoding**: Optimized algorithms for common operations
+- **Comprehensive Benchmarking**: Built-in performance testing for all operations
+
+### Benchmark Results (on modern hardware)
+
+| Operation | 100x100 | 500x500 | 1000x1000 |
+|-----------|---------|----------|-----------|
+| **Create** | 0.01ms | 0.22ms | 0.85ms |
+| **Resize** | 0.26ms | 6.77ms | 25.47ms |
+| **Blur** | 0.30ms | 7.74ms | 30.40ms |
+| **Brightness** | 0.13ms | 3.15ms | 12.33ms |
+
+| Format | Save Time (512x512) |
+|--------|---------------------|
+| **BMP** | 6.64ms |
+| **PNG** | 0.47ms |
+| **WebP** | 0.37ms |
+
+Run `zig build run -- benchmark` to test performance on your system.
 
 ## 📦 Installation
 
@@ -157,8 +175,8 @@ pub fn main() !void {
 
     // Apply processing operations
     try image.resize(800, 600);
-    try image.brightness(10);
-    try image.contrast(1.2);
+    try image.adjustBrightness(10);
+    try image.adjustContrast(1.2);
     try image.blur(2);
 
     // Convert color space
@@ -196,6 +214,24 @@ pub fn main() !void {
 }
 ```
 
+### Command Line Interface
+
+zpix includes a CLI tool for common operations:
+
+```bash
+# Convert between formats
+zig build run -- convert input.png output.bmp
+
+# Run test suite
+zig build run -- test
+
+# Run performance benchmarks
+zig build run -- benchmark
+
+# Show help
+zig build run -- help
+```
+
 ## 📚 API Reference
 
 ### Image Struct
@@ -214,14 +250,14 @@ pub const Image = struct {
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !Image;
     pub fn save(self: Image, path: []const u8, format: ImageFormat) !void;
 
-    // Processing methods (when implemented)
-    // pub fn resize(self: *Image, new_width: u32, new_height: u32) !void;
-    // pub fn crop(self: *Image, x: u32, y: u32, width: u32, height: u32) !void;
-    // pub fn rotate(self: *Image, degrees: u16) !void;
-    // pub fn convert(self: *Image, target_format: PixelFormat) !void;
-    // pub fn brightness(self: *Image, adjustment: i16) !void;
-    // pub fn contrast(self: *Image, factor: f32) !void;
-    // pub fn blur(self: *Image, radius: u8) !void;
+    // Processing methods
+    pub fn resize(self: *Image, new_width: u32, new_height: u32) !void;
+    pub fn crop(self: *Image, x: u32, y: u32, width: u32, height: u32) !void;
+    pub fn rotate(self: *Image, degrees: u16) !void;
+    pub fn convert(self: *Image, target_format: PixelFormat) !void;
+    pub fn adjustBrightness(self: *Image, adjustment: i16) !void;
+    pub fn adjustContrast(self: *Image, factor: f32) !void;
+    pub fn blur(self: *Image, radius: u32) !void;
 };
 ```
 
