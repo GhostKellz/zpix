@@ -45,43 +45,45 @@ to change!
 - **🔧 Comprehensive API**: Load, process, and save images with a clean, intuitive interface
 - **📦 Self-Contained**: No external dependencies, pure Zig implementation
 - **🔄 Cross-Platform**: Works on all platforms supported by Zig
+- **🧪 Reproducible Workflows**: Command-line pipelines, batch scripts, and streaming I/O for automation
 
 ## 📋 Supported Formats
 
 | Format | Load | Save | Status | Notes |
 |--------|------|------|--------|-------|
-| **BMP** | ✅ | ✅ | Complete | 24-bit RGB, grayscale support |
-| **PNG** | ✅ | ✅ | Complete | 8-bit RGB/RGBA with alpha channel support |
-| **JPEG** | 🔄 | ❌ | In Progress | Huffman decoding framework implemented |
-| **WebP** | 🔄 | ✅ | Partial | Basic lossless support, lossy in progress |
-| **AVIF** | ❌ | ❌ | Planned | Modern high-efficiency format |
-| **TIFF** | ❌ | ❌ | Planned | Multi-page and compression support |
-| **GIF** | ❌ | ❌ | Planned | Animation support |
-| **SVG** | ❌ | ❌ | Planned | Subset rendering support |
+| **BMP** | ✅ | ✅ | Stable | 24-bit RGB/Grayscale |
+| **PNG** | ✅ | ✅ | Stable | 8-bit RGB/RGBA (non-interlaced) |
+| **JPEG** | ✅ | ✅ | Beta | Baseline decoder/encoder, no progressive support yet |
+| **WebP** | ⚠️ | ⚠️ | Experimental | Placeholder decode/encode paths for MVP validation |
+| **AVIF** | ✅ | ❌ | Beta | AV1-based decoder (decode-only) |
+| **TIFF** | ✅ | ❌ | Beta | Uncompressed 8-bit RGB/RGBA/Grayscale |
+| **GIF** | ✅ | ❌ | Beta | Palette decode (first frame), animation reader available |
+| **SVG** | ✅ | ❌ | Beta | Rasterizes basic shapes to RGB |
 
 ## 🎨 Color Spaces
 
-| Color Space | Support | Conversion |
-|-------------|---------|------------|
-| **RGB** | ✅ | Full support |
-| **RGBA** | ✅ | Alpha channel handling |
-| **Grayscale** | ✅ | Luminance-based conversion |
-| **YUV** | ✅ | 4:4:4 conversion |
-| **HSV** | 🔄 | Framework ready |
-| **CMYK** | 🔄 | Framework ready |
+| Color Space | Support | Notes |
+|-------------|---------|-------|
+| **RGB** | ✅ | Primary working space |
+| **RGBA** | ✅ | Alpha-aware operations and conversions |
+| **Grayscale** | ✅ | Luminance conversion helpers |
+| **YUV** | ✅ | 4:4:4 RGB ↔ YUV vectorized transforms |
+| **HSV** | ✅ | RGB ↔ HSV vectorized transforms |
+| **CMYK** | ⚠️ | Pixel type defined; conversions planned |
 
 ## 🛠️ Operations
 
 | Operation | Status | Description |
 |-----------|--------|-------------|
-| **Resize** | ✅ | High-quality bilinear interpolation |
+| **Resize** | ✅ | SIMD-accelerated bilinear interpolation |
 | **Crop** | ✅ | Rectangular region extraction |
-| **Rotate** | ✅ | 90°, 180°, 270° rotations |
-| **Brightness** | ✅ | Adjustable intensity (+/- values) |
-| **Contrast** | ✅ | Factor-based adjustment |
-| **Blur** | ✅ | Box blur with configurable radius |
-| **Color Correction** | 🔄 | Framework ready |
-| **Filters** | 🔄 | Framework ready |
+| **Rotate** | ✅ | 90°, 180°, 270°, and arbitrary-angle rotations |
+| **Flip** | ✅ | Horizontal and vertical mirroring |
+| **Brightness** | ✅ | Signed adjustment with clamping |
+| **Contrast** | ✅ | Floating-point contrast scaling |
+| **Blur** | ✅ | Separable box blur with adjustable radius |
+| **Grayscale** | ✅ | Luminance conversion from RGB |
+| **Format Convert** | ✅ | Pixel format conversions (RGB/RGBA/Grayscale/HSV/YUV) |
 
 ## ⚡ Performance
 
@@ -89,6 +91,7 @@ to change!
 - **Parallel Processing**: Designed for concurrent image processing
 - **Memory Efficient**: Exact memory usage tracking, zero-copy where possible
 - **Fast Decoding**: Optimized algorithms for common operations
+- **Fixed-Point JPEG IDCT**: Baseline JPEG decoding uses an integer inverse DCT for higher throughput
 - **Comprehensive Benchmarking**: Built-in performance testing for all operations
 
 ### Benchmark Results (on modern hardware)
@@ -219,18 +222,43 @@ pub fn main() !void {
 zpix includes a CLI tool for common operations:
 
 ```bash
-# Convert between formats
+# Convert between formats (detects output from extension)
 zig build run -- convert input.png output.bmp
 
-# Run test suite
-zig build run -- test
+# Stream into a pipeline (reads stdin, writes stdout)
+cat input.png | zig build run -- pipeline - resize:512x512 format:bmp save:- > thumb.bmp
 
-# Run performance benchmarks
+# Execute a multi-step pipeline directly
+zig build run -- pipeline photo.jpg resize:1024x768 blur:2 format:jpeg save:processed.jpg
+
+# Apply batch jobs from a script file
+zig build run -- batch scripts/jobs.zps
+
+# Run test suite / benchmarks / help
+zig build test
 zig build run -- benchmark
-
-# Show help
 zig build run -- help
 ```
+
+Example batch script (`scripts/jobs.zps`):
+
+```text
+# Create thumbnails and emit PNG files with progress reporting
+job operation=resize inputs=assets/gallery/*.bmp output=zig-out/tmp/thumbs width=256 height=256 threads=4 progress=true overwrite=true
+
+# Convert a directory of RAW exports into PNGs while flattening structure
+job operation=convert_format inputs=exports/2024 output=zig-out/tmp/exports format=png recursive=true preserve_structure=false
+
+# Apply a warm white balance tweak to a single file
+job operation=white_balance input=shoots/portrait.bmp output=zig-out/tmp/portrait temperature=0.15 tint=0.02 overwrite=true
+```
+
+Each `job` line uses simple `key=value` pairs:
+
+- `operation` selects the batch action (`resize`, `convert_format`, `blur`, `adjust_brightness`, `rotate`, `crop`, `white_balance`, `color_profile_convert`).
+- `inputs` (or `input`) accepts comma-separated file paths, directories, or globs (`*`, `?`). Use `recursive=true` to walk sub-directories.
+- `output` sets the destination directory; `preserve_structure=false` flattens nested folders.
+- Optional switches such as `threads`, `overwrite`, and `progress` control execution.
 
 ## 📚 API Reference
 

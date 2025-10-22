@@ -54,12 +54,12 @@ pub const BatchParams = union(BatchOperation) {
         target_profile: []const u8,
     },
     custom: struct {
-        processor: *const fn(*root.Image) anyerror!void,
+        processor: *const fn (*root.Image) anyerror!void,
     },
 };
 
 /// Progress callback function type
-pub const ProgressCallback = *const fn(completed: u32, total: u32, current_file: []const u8) void;
+pub const ProgressCallback = *const fn (completed: u32, total: u32, current_file: []const u8) void;
 
 /// Cancellation token for stopping batch operations
 pub const CancellationToken = struct {
@@ -171,6 +171,66 @@ const WorkerData = struct {
     mutex: *std.Thread.Mutex,
 };
 
+const OperationResult = struct {
+    output_format: ?root.ImageFormat = null,
+};
+
+const SavePlan = struct {
+    format: root.ImageFormat,
+    extension: []const u8,
+};
+
+fn inferFormatFromPath(path: []const u8) ?root.ImageFormat {
+    if (std.mem.endsWith(u8, path, ".bmp") or std.mem.endsWith(u8, path, ".BMP")) return .bmp;
+    if (std.mem.endsWith(u8, path, ".png") or std.mem.endsWith(u8, path, ".PNG")) return .png;
+    if (std.mem.endsWith(u8, path, ".jpg") or std.mem.endsWith(u8, path, ".jpeg") or
+        std.mem.endsWith(u8, path, ".JPG") or std.mem.endsWith(u8, path, ".JPEG")) return .jpeg;
+    if (std.mem.endsWith(u8, path, ".webp") or std.mem.endsWith(u8, path, ".WEBP")) return .webp;
+    if (std.mem.endsWith(u8, path, ".gif") or std.mem.endsWith(u8, path, ".GIF")) return .gif;
+    if (std.mem.endsWith(u8, path, ".tiff") or std.mem.endsWith(u8, path, ".tif") or
+        std.mem.endsWith(u8, path, ".TIFF") or std.mem.endsWith(u8, path, ".TIF")) return .tiff;
+    if (std.mem.endsWith(u8, path, ".avif") or std.mem.endsWith(u8, path, ".AVIF")) return .avif;
+    if (std.mem.endsWith(u8, path, ".svg") or std.mem.endsWith(u8, path, ".SVG")) return .svg;
+    return null;
+}
+
+fn extensionForFormat(format: root.ImageFormat) []const u8 {
+    return switch (format) {
+        .bmp => ".bmp",
+        .png => ".png",
+        .jpeg => ".jpg",
+        .webp => ".webp",
+        .gif => ".gif",
+        .tiff => ".tiff",
+        .avif => ".avif",
+        .svg => ".svg",
+    };
+}
+
+fn determineSavePlan(input_path: []const u8, override: ?root.ImageFormat) SavePlan {
+    if (override) |fmt| {
+        return SavePlan{ .format = fmt, .extension = extensionForFormat(fmt) };
+    }
+
+    const inferred_raw = inferFormatFromPath(input_path) orelse .png;
+    const inferred = switch (inferred_raw) {
+        .bmp, .png, .jpeg, .webp => inferred_raw,
+        else => .png,
+    };
+    return SavePlan{ .format = inferred, .extension = extensionForFormat(inferred) };
+}
+
+fn parseColorProfile(name: []const u8) ?root.ColorProfile {
+    if (std.ascii.eqlIgnoreCase(name, "srgb")) return .srgb;
+    if (std.ascii.eqlIgnoreCase(name, "adobe_rgb") or std.ascii.eqlIgnoreCase(name, "adobe_rgb_1998")) return .adobe_rgb_1998;
+    if (std.ascii.eqlIgnoreCase(name, "pro_photo") or std.ascii.eqlIgnoreCase(name, "pro_photo_rgb")) return .pro_photo_rgb;
+    if (std.ascii.eqlIgnoreCase(name, "rec2020")) return .rec2020;
+    if (std.ascii.eqlIgnoreCase(name, "display_p3")) return .display_p3;
+    if (std.ascii.eqlIgnoreCase(name, "rec709")) return .rec709;
+    if (std.ascii.eqlIgnoreCase(name, "linear_rgb") or std.ascii.eqlIgnoreCase(name, "linear")) return .linear_rgb;
+    return null;
+}
+
 /// Execute batch processing job
 pub fn executeBatch(allocator: std.mem.Allocator, job: *const BatchJob) !BatchResult {
     const start_time = std.time.milliTimestamp();
@@ -245,6 +305,9 @@ fn workerThread(data: *WorkerData) void {
                 error.AccessDenied => "Access denied",
                 error.OutOfMemory => "Out of memory",
                 error.InvalidFormat => "Invalid image format",
+                error.UnsupportedFormat => "Unsupported output format",
+                error.UnknownColorProfile => "Unknown color profile",
+                error.OperationNotSupported => "Operation not supported",
                 else => "Unknown error",
             };
 
@@ -265,14 +328,22 @@ fn processFile(data: *WorkerData, input_file: []const u8, index: u32) !void {
     _ = index;
 
     // Load image
-    var image = try root.Image.load(input_file, data.allocator);
+    var image = try root.Image.load(data.allocator, input_file);
     defer image.deinit();
 
     // Apply operation
-    try applyOperation(&image, data.job.operation);
+    const op_result = try applyOperation(&image, data.job.operation);
+
+    const save_plan = determineSavePlan(input_file, op_result.output_format);
 
     // Generate output filename
-    const output_path = try generateOutputPath(data.allocator, input_file, data.job.output_dir, data.job.preserve_structure);
+    const output_path = try generateOutputPath(
+        data.allocator,
+        input_file,
+        data.job.output_dir,
+        data.job.preserve_structure,
+        save_plan.extension,
+    );
     defer data.allocator.free(output_path);
 
     // Check if output file exists
@@ -291,7 +362,7 @@ fn processFile(data: *WorkerData, input_file: []const u8, index: u32) !void {
     }
 
     // Save image
-    try image.save(output_path);
+    try image.save(output_path, save_plan.format);
 
     data.mutex.lock();
     defer data.mutex.unlock();
@@ -299,50 +370,84 @@ fn processFile(data: *WorkerData, input_file: []const u8, index: u32) !void {
 }
 
 /// Apply batch operation to image
-fn applyOperation(image: *root.Image, operation: BatchParams) !void {
-    switch (operation) {
-        .resize => |params| {
+fn applyOperation(image: *root.Image, operation: BatchParams) !OperationResult {
+    return switch (operation) {
+        .resize => |params| blk: {
             if (params.maintain_aspect) {
                 const aspect_ratio = @as(f32, @floatFromInt(image.width)) / @as(f32, @floatFromInt(image.height));
-                const new_height = @as(u32, @intFromFloat(@as(f32, @floatFromInt(params.width)) / aspect_ratio));
-                try image.resize(params.width, new_height);
+                const target_width = params.width;
+                const computed_height = @as(f32, @floatFromInt(target_width)) / aspect_ratio;
+                const rounded_height = @max(@as(u32, @intFromFloat(@round(computed_height))), 1);
+                try image.resize(target_width, rounded_height);
             } else {
                 try image.resize(params.width, params.height);
             }
+            break :blk OperationResult{};
         },
-        .convert_format => |params| {
-            image.format = params.target_format;
+        .convert_format => |params| OperationResult{ .output_format = params.target_format },
+        .adjust_brightness => |params| blk: {
+            const clamped = std.math.clamp(params.brightness, std.math.minInt(i16), std.math.maxInt(i16));
+            try image.adjustBrightness(@intCast(clamped));
+            break :blk OperationResult{};
         },
-        .adjust_brightness => |params| {
-            try image.adjustBrightness(params.brightness);
-        },
-        .adjust_contrast => |params| {
+        .adjust_contrast => |params| blk: {
             try image.adjustContrast(params.contrast);
+            break :blk OperationResult{};
         },
-        .blur => |params| {
+        .blur => |params| blk: {
             try image.blur(params.radius);
+            break :blk OperationResult{};
         },
-        .rotate => |params| {
-            try image.rotate(params.angle);
+        .rotate => |params| blk: {
+            switch (params.angle) {
+                .rotate_90 => try image.rotate90(),
+                .rotate_180 => try image.rotateArbitrary(180.0),
+                .rotate_270 => try image.rotateArbitrary(270.0),
+            }
+            break :blk OperationResult{};
         },
-        .crop => |params| {
+        .crop => |params| blk: {
             try image.crop(params.x, params.y, params.width, params.height);
+            break :blk OperationResult{};
         },
-        .white_balance => |params| {
+        .white_balance => |params| blk: {
             try image.adjustWhiteBalance(params.temperature, params.tint);
+            break :blk OperationResult{};
         },
-        .color_profile_convert => |_| {
-            // TODO: Implement color profile conversion
+        .color_profile_convert => |params| blk: {
+            const target = parseColorProfile(params.target_profile) orelse return error.UnknownColorProfile;
+            const converted = try root.color_profile_functions.convertImageProfile(
+                image.allocator,
+                image.data,
+                image.width,
+                image.height,
+                .srgb,
+                target,
+            );
+            image.allocator.free(image.data);
+            image.data = converted;
+            image.format = .rgb;
+            break :blk OperationResult{};
         },
-        .custom => |params| {
+        .custom => |params| blk: {
             try params.processor(image);
+            break :blk OperationResult{};
         },
-    }
+    };
 }
 
 /// Generate output path for processed image
-fn generateOutputPath(allocator: std.mem.Allocator, input_path: []const u8, output_dir: []const u8, preserve_structure: bool) ![]u8 {
+fn generateOutputPath(
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    output_dir: []const u8,
+    preserve_structure: bool,
+    extension: []const u8,
+) ![]u8 {
     const basename = std.fs.path.basename(input_path);
+    const stem = std.fs.path.stem(basename);
+    const file_name = try std.fmt.allocPrint(allocator, "{s}{s}", .{ stem, extension });
+    defer allocator.free(file_name);
 
     if (preserve_structure) {
         // Preserve directory structure relative to a common root
@@ -355,9 +460,9 @@ fn generateOutputPath(allocator: std.mem.Allocator, input_path: []const u8, outp
         const output_subdir = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, relative_path });
         defer allocator.free(output_subdir);
 
-        return try std.fs.path.join(allocator, &[_][]const u8{ output_subdir, basename });
+        return try std.fs.path.join(allocator, &[_][]const u8{ output_subdir, file_name });
     } else {
-        return try std.fs.path.join(allocator, &[_][]const u8{ output_dir, basename });
+        return try std.fs.path.join(allocator, &[_][]const u8{ output_dir, file_name });
     }
 }
 
@@ -415,7 +520,7 @@ fn scanDirectoryRecursive(allocator: std.mem.Allocator, files: *std.ArrayList([]
 fn matchesPattern(filename: []const u8, pattern: []const u8) bool {
     if (std.mem.indexOf(u8, pattern, "*")) |star_pos| {
         const prefix = pattern[0..star_pos];
-        const suffix = pattern[star_pos + 1..];
+        const suffix = pattern[star_pos + 1 ..];
 
         return std.mem.startsWith(u8, filename, prefix) and std.mem.endsWith(u8, filename, suffix);
     } else {
@@ -511,3 +616,93 @@ pub const BatchJobBuilder = struct {
         };
     }
 };
+
+test "executeBatch resizes images" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const allocator = std.testing.allocator;
+
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+
+    const input_path = try std.fs.path.join(allocator, &[_][]const u8{ tmp_root, "input.bmp" });
+    defer allocator.free(input_path);
+
+    var image = try root.Image.init(allocator, 8, 8, .rgb);
+    defer image.deinit();
+    @memset(image.data, 120);
+    try image.save(input_path, .bmp);
+
+    const output_dir = try std.fs.path.join(allocator, &[_][]const u8{ tmp_root, "out" });
+    defer allocator.free(output_dir);
+    try std.fs.cwd().makePath(output_dir);
+
+    const files = [_][]const u8{input_path};
+    var job = try BatchJob.init(allocator, &files, output_dir, BatchParams{ .resize = .{ .width = 4, .height = 4, .maintain_aspect = false } });
+    defer job.deinit(allocator);
+    job.overwrite_existing = true;
+    job.preserve_structure = false;
+    job.thread_count = 2;
+
+    var result = try executeBatch(allocator, &job);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(u32, 1), result.processed_files);
+    try std.testing.expectEqual(@as(u32, 0), result.failed_files);
+
+    const output_path = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, "input.bmp" });
+    defer allocator.free(output_path);
+
+    var processed = try root.Image.load(allocator, output_path);
+    defer processed.deinit();
+    try std.testing.expectEqual(@as(u32, 4), processed.width);
+    try std.testing.expectEqual(@as(u32, 4), processed.height);
+}
+
+test "executeBatch converts formats" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const allocator = std.testing.allocator;
+
+    const tmp_root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_root);
+
+    const input_path = try std.fs.path.join(allocator, &[_][]const u8{ tmp_root, "photo.bmp" });
+    defer allocator.free(input_path);
+
+    var image = try root.Image.init(allocator, 6, 6, .rgb);
+    defer image.deinit();
+    @memset(image.data, 200);
+    try image.save(input_path, .bmp);
+
+    const output_dir = try std.fs.path.join(allocator, &[_][]const u8{ tmp_root, "converted" });
+    defer allocator.free(output_dir);
+    try std.fs.cwd().makePath(output_dir);
+
+    const files = [_][]const u8{input_path};
+    var job = try BatchJob.init(allocator, &files, output_dir, BatchParams{ .convert_format = .{ .target_format = .png } });
+    defer job.deinit(allocator);
+    job.overwrite_existing = true;
+    job.preserve_structure = false;
+
+    var result = try executeBatch(allocator, &job);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(u32, 1), result.processed_files);
+    try std.testing.expectEqual(@as(u32, 0), result.failed_files);
+
+    const png_path = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, "photo.png" });
+    defer allocator.free(png_path);
+
+    {
+        const file = try std.fs.openFileAbsolute(png_path, .{});
+        defer file.close();
+    }
+
+    var converted = try root.Image.load(allocator, png_path);
+    defer converted.deinit();
+    try std.testing.expectEqual(@as(u32, 6), converted.width);
+    try std.testing.expectEqual(@as(u32, 6), converted.height);
+}

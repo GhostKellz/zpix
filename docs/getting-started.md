@@ -82,21 +82,32 @@ my-project/
 ### Loading Images
 
 ```zig
-// BMP files
-var bmp_image = try zpix.Image.load(allocator, "image.bmp");
+// BMP / PNG / JPEG
+var bmp = try zpix.Image.load(allocator, "image.bmp");
+defer bmp.deinit();
 
-// PNG files
-var png_image = try zpix.Image.load(allocator, "image.png");
+var png = try zpix.Image.load(allocator, "image.png");
+defer png.deinit();
 
-// JPEG files (partial support)
-var jpg_image = try zpix.Image.load(allocator, "image.jpg");
+var jpeg = try zpix.Image.load(allocator, "image.jpg");
+defer jpeg.deinit();
+
+// GIF (first frame), TIFF (uncompressed), AVIF decode-only
+var gif = try zpix.Image.load(allocator, "sprite.gif");
+defer gif.deinit();
+
+// Experimental WebP placeholder codec for MVP validation
+var webp = try zpix.Image.load(allocator, "sample.webp");
+defer webp.deinit();
 ```
 
 ### Saving Images
 
 ```zig
-// Save as BMP (currently the only supported output format)
 try image.save("output.bmp", .bmp);
+try image.save("output.png", .png);
+try image.save("output.jpg", .jpeg); // Baseline encoder
+try image.save("output.webp", .webp); // Experimental placeholder
 ```
 
 ## 🎨 Basic Image Operations
@@ -118,16 +129,16 @@ pub fn main() !void {
     try image.crop(100, 100, 200, 200);
 
     // Adjust brightness (+20)
-    try image.brightness(20);
+    try image.adjustBrightness(20);
 
     // Increase contrast by 20%
-    try image.contrast(1.2);
+    try image.adjustContrast(1.2);
 
     // Apply blur with radius 2
     try image.blur(2);
 
     // Convert to grayscale
-    try image.convert(.grayscale);
+    try image.convertToGrayscale();
 
     // Save the result
     try image.save("processed.bmp", .bmp);
@@ -161,7 +172,32 @@ pub fn main() !void {
 }
 ```
 
-## 🐛 Error Handling
+## �️ Automating with the CLI
+
+zpix ships with a CLI that mirrors the library operations:
+
+```bash
+# Run a multi-step pipeline directly
+zig build run -- pipeline photo.jpg resize:1024x768 blur:2 format:jpeg save:processed.jpg
+
+# Stream through stdin/stdout using '-'
+cat input.png | zig build run -- pipeline - resize:256x256 format:bmp save:- > thumb.bmp
+
+# Execute many pipelines from a script
+zig build run -- batch scripts/jobs.zps
+```
+
+Example batch script (`scripts/jobs.zps`):
+
+```text
+# Resize gallery inputs
+pipeline assets/gallery/cat.bmp resize:800x600 format:png save:zig-out/tmp/cat.png
+pipeline assets/gallery/dog.bmp resize:256x256 grayscale format:bmp save:zig-out/tmp/dog-thumb.bmp
+```
+
+Run `zig build test` to execute both library and CLI regression suites.
+
+## �🐛 Error Handling
 
 zpix uses Zig's error handling system. Common errors include:
 

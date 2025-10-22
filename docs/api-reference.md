@@ -89,7 +89,7 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !Image
 
 **Returns:** Loaded `Image` instance
 
-**Supported Formats:** BMP, PNG, JPEG (partial)
+**Supported Formats:** BMP, PNG, JPEG (baseline), WebP (experimental), AVIF (decode-only), TIFF (uncompressed 8-bit), GIF (palette), SVG (rasterized)
 
 **Example:**
 ```zig
@@ -112,7 +112,7 @@ pub fn save(self: Image, path: []const u8, format: ImageFormat) !void
 - `path`: Output file path
 - `format`: Output format
 
-**Supported Formats:** BMP
+**Supported Formats:** BMP, PNG, JPEG (baseline encoder), WebP (experimental MVP)
 
 **Example:**
 ```zig
@@ -165,50 +165,59 @@ pub fn crop(self: *Image, x: u32, y: u32, width: u32, height: u32) !void
 - `width`: Width of crop region
 - `height`: Height of crop region
 
-### Image.rotate
+### Image.rotateArbitrary
 
-Rotates the image by 90, 180, or 270 degrees.
+Rotates the image by any angle in degrees (specializations exist for 90°, 180°, 270°).
 
 ```zig
-pub fn rotate(self: *Image, degrees: u16) !void
+pub fn rotateArbitrary(self: *Image, degrees: f32) !void
 ```
 
 **Parameters:**
-- `degrees`: Rotation angle (90, 180, or 270)
+- `degrees`: Rotation angle in degrees (positive = clockwise)
 
-### Image.convert
+### Image.convertColorSpaceVectorized
 
-Converts the image to a different pixel format.
+Converts the image to a different pixel format using SIMD-backed transforms.
 
 ```zig
-pub fn convert(self: *Image, target_format: PixelFormat) !void
+pub fn convertColorSpaceVectorized(self: *Image, target_format: PixelFormat) !void
 ```
 
 **Parameters:**
-- `target_format`: Target pixel format
+- `target_format`: Target pixel format (e.g. `.hsv`, `.yuv`, `.rgb`)
 
 **Supported Conversions:**
-- RGB ↔ Grayscale
-- RGBA → RGB
-- RGB → YUV
+- RGB ↔ HSV
+- RGB ↔ YUV
+- RGBA ↔ RGB (alpha preserved)
+- RGB ↔ Grayscale (via `convertToGrayscale` convenience helper)
 
-### Image.brightness
+### Image.convertToGrayscale
+
+Converts the image to grayscale using luminance weighting.
+
+```zig
+pub fn convertToGrayscale(self: *Image) !void
+```
+
+### Image.adjustBrightness
 
 Adjusts the brightness of the image.
 
 ```zig
-pub fn brightness(self: *Image, adjustment: i16) !void
+pub fn adjustBrightness(self: *Image, adjustment: i16) !void
 ```
 
 **Parameters:**
 - `adjustment`: Brightness adjustment (-255 to +255)
 
-### Image.contrast
+### Image.adjustContrast
 
 Adjusts the contrast of the image.
 
 ```zig
-pub fn contrast(self: *Image, factor: f32) !void
+pub fn adjustContrast(self: *Image, factor: f32) !void
 ```
 
 **Parameters:**
@@ -224,6 +233,15 @@ pub fn blur(self: *Image, radius: u8) !void
 
 **Parameters:**
 - `radius`: Blur radius (1-255)
+
+### Image.flipHorizontal / Image.flipVertical
+
+Mirrors the image across the X or Y axis.
+
+```zig
+pub fn flipHorizontal(self: *Image) !void
+pub fn flipVertical(self: *Image) !void
+```
 
 ## 🔧 Utility Functions
 
@@ -261,11 +279,11 @@ pub fn processImage(allocator: std.mem.Allocator, input_path: []const u8, output
 
     // Apply processing
     try image.resize(800, 600);
-    try image.brightness(20);
-    try image.convert(.grayscale);
+    try image.adjustBrightness(20);
+    try image.convertToGrayscale();
 
     // Save result
-    try image.save(output_path, .bmp);
+    try image.save(output_path, .png);
 }
 ```
 

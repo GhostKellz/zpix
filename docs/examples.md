@@ -64,8 +64,8 @@ pub fn enhancePhoto(allocator: std.mem.Allocator, input_path: []const u8, output
     defer image.deinit();
 
     // Apply enhancement pipeline
-    try image.brightness(10);    // Slightly brighter
-    try image.contrast(1.2);     // Increase contrast
+    try image.adjustBrightness(10);    // Slightly brighter
+    try image.adjustContrast(1.2);     // Increase contrast
     try image.blur(1);           // Subtle sharpening effect
 
     try image.save(output_path, .bmp);
@@ -83,7 +83,7 @@ pub fn createThumbnail(allocator: std.mem.Allocator, input_path: []const u8, out
     try image.resize(150, 150);
 
     // Optional: Convert to grayscale for smaller file size
-    try image.convert(.grayscale);
+    try image.convertToGrayscale();
 
     try image.save(output_path, .bmp);
 }
@@ -218,8 +218,8 @@ pub fn processLargeImage(allocator: std.mem.Allocator, path: []const u8) !void {
     try image.resize(1024, 768);
 
     // Apply filters
-    try image.contrast(1.1);
-    try image.brightness(5);
+    try image.adjustContrast(1.1);
+    try image.adjustBrightness(5);
 
     try image.save("processed.bmp", .bmp);
 }
@@ -244,7 +244,7 @@ test "image processing pipeline" {
     @memset(image.data, 128);
 
     // Apply processing
-    try image.brightness(20);
+    try image.adjustBrightness(20);
     try image.resize(50, 50);
 
     // Verify results
@@ -259,44 +259,49 @@ test "image processing pipeline" {
 # Build the CLI tool
 zig build
 
-# Process an image
-./zig-out/bin/zpix process input.png output.bmp --brightness 10 --contrast 1.2
+# Convert between formats
+zig build run -- convert input.png output.jpeg
 
-# Create thumbnail
-./zig-out/bin/zpix thumbnail input.jpg thumbnail.bmp 150x150
+# Run an inline pipeline
+zig build run -- pipeline photo.png resize:800x600 blur:2 format:png save:output/pipeline.png
 
-# Convert format
-./zig-out/bin/zpix convert input.png output.bmp
+# Execute batch scripts
+zig build run -- batch scripts/jobs.zps
+
+# Run regression tests / benchmarks
+zig build test
+zig build run -- benchmark
 ```
 
-## 🔗 Integration Examples
+## 🔗 Automating from Zig
 
-### Using with HTTP Server
+You can mix the CLI pipelines with other Zig code using `std.ChildProcess`:
 
 ```zig
 const std = @import("std");
-const zpix = @import("zpix");
-// Assuming you have an HTTP server library
 
-pub fn handleImageUpload(allocator: std.mem.Allocator, image_data: []const u8) ![]const u8 {
-    // Parse uploaded image
-    var image = try zpix.Image.loadFromMemory(allocator, image_data);
-    defer image.deinit();
+pub fn generateThumbnail(input_path: []const u8, output_path: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
-    // Process image (resize for web)
-    try image.resize(800, 600);
+    const exe_path = "zig-out/bin/zpix"; // Ensure `zig build` ran first
 
-    // Convert to JPEG for web delivery
-    // Note: JPEG saving not yet implemented in MVP
-    // For now, save as BMP
-    var output = std.ArrayList(u8).init(allocator);
-    defer output.deinit();
+    var args = std.ArrayList([]const u8).init(allocator);
+    defer args.deinit();
 
-    // This would be the API for saving to memory
-    // try image.saveToMemory(&output, .jpeg);
+    try args.appendSlice(&.{ exe_path, "pipeline", input_path, "resize:256x256", "format:png", try std.fmt.allocPrint(allocator, "save:{s}", .{output_path}) });
 
-    return output.toOwnedSlice();
+    var child = std.ChildProcess.init(args.items, allocator);
+    defer child.deinit();
+
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    try child.spawn();
+    _ = try child.wait();
 }
 ```
 
-These examples demonstrate the versatility and ease of use of the zpix library for various image processing tasks.
+These examples demonstrate the versatility of zpix for both library-style image processing and automated CLI workflows.

@@ -160,6 +160,7 @@ const HuffmanTable = struct {
 const FrameHeader = struct {
     width: u32,
     height: u32,
+    component_count: u8,
     components: [3]Component,
 };
 
@@ -171,11 +172,15 @@ const Component = struct {
 };
 
 const ScanHeader = struct {
+    component_count: u8,
     components: [3]ScanComponent,
     start_spectral: u8,
     end_spectral: u8,
     approximation: u8,
 };
+
+// Zigzag order for mapping DCT coefficients
+const zigzag_order = [64]u8{ 0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63 };
 
 const ScanComponent = struct {
     id: u8,
@@ -220,6 +225,178 @@ const BitReader = struct {
     }
 };
 
+const BitWriter = struct {
+    allocator: std.mem.Allocator,
+    buffer: std.ArrayListUnmanaged(u8),
+    accumulator: u8,
+    bit_count: u4,
+
+    fn init(allocator: std.mem.Allocator) BitWriter {
+        return BitWriter{
+            .allocator = allocator,
+            .buffer = .{},
+            .accumulator = 0,
+            .bit_count = 0,
+        };
+    }
+
+    fn deinit(self: *BitWriter) void {
+        self.buffer.deinit(self.allocator);
+    }
+
+    fn appendByte(self: *BitWriter, byte: u8) !void {
+        try self.buffer.append(self.allocator, byte);
+        if (byte == 0xFF) {
+            try self.buffer.append(self.allocator, 0x00);
+        }
+    }
+
+    fn writeBit(self: *BitWriter, bit: u1) !void {
+        self.accumulator = (self.accumulator << 1) | @as(u8, bit);
+        self.bit_count += 1;
+        if (self.bit_count == 8) {
+            try self.flushByte();
+        }
+    }
+
+    fn writeBits(self: *BitWriter, value: u16, count: u8) !void {
+        var remaining = count;
+        while (remaining > 0) {
+            remaining -= 1;
+            const shift: std.math.Log2Int(u16) = @intCast(remaining);
+            const bit_value: u1 = @intCast((value >> shift) & 1);
+            try self.writeBit(bit_value);
+        }
+    }
+
+    fn flush(self: *BitWriter) !void {
+        if (self.bit_count > 0) {
+            const bit_count_u8: u8 = @intCast(self.bit_count);
+            const padding: u8 = 8 - bit_count_u8;
+            const shift: std.math.Log2Int(u8) = @intCast(padding);
+            const byte = self.accumulator << shift;
+            try self.appendByte(byte);
+            self.accumulator = 0;
+            self.bit_count = 0;
+        }
+    }
+
+    fn flushByte(self: *BitWriter) !void {
+        try self.appendByte(self.accumulator);
+        self.accumulator = 0;
+        self.bit_count = 0;
+    }
+};
+
+const JpegQuantTable = struct {
+    data: [64]u8,
+};
+
+const JpegHuffmanTable = struct {
+    codes: [256]u16,
+    code_lengths: [256]u8,
+};
+
+const std_luma_quant: JpegQuantTable = .{ .data = [_]u8{
+    16, 11, 10, 16, 24,  40,  51,  61,
+    12, 12, 14, 19, 26,  58,  60,  55,
+    14, 13, 16, 24, 40,  57,  69,  56,
+    14, 17, 22, 29, 51,  87,  80,  62,
+    18, 22, 37, 56, 68,  109, 103, 77,
+    24, 35, 55, 64, 81,  104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101,
+    72, 92, 95, 98, 112, 100, 103, 99,
+} };
+
+const std_chroma_quant: JpegQuantTable = .{ .data = [_]u8{
+    17, 18, 24, 47, 99, 99, 99, 99,
+    18, 21, 26, 66, 99, 99, 99, 99,
+    24, 26, 56, 99, 99, 99, 99, 99,
+    47, 66, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+    99, 99, 99, 99, 99, 99, 99, 99,
+} };
+
+const std_dc_luma_bits = [_]u8{ 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0 };
+const std_dc_luma_vals = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+const std_dc_chroma_bits = [_]u8{ 0, 0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0 };
+const std_dc_chroma_vals = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+
+const std_ac_luma_bits = [_]u8{ 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125 };
+const std_ac_luma_vals = [_]u8{
+    0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12,
+    0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
+    0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08,
+    0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0,
+    0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16,
+    0x17, 0x18, 0x19, 0x1A, 0x25, 0x26, 0x27, 0x28,
+    0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+    0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+    0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
+    0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
+    0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79,
+    0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+    0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98,
+    0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+    0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6,
+    0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5,
+    0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3, 0xD4,
+    0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2,
+    0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA,
+    0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8,
+    0xF9, 0xFA,
+};
+
+const std_ac_chroma_bits = [_]u8{ 0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119 };
+const std_ac_chroma_vals = [_]u8{
+    0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21,
+    0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
+    0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91,
+    0xA1, 0xB1, 0xC1, 0x09, 0x23, 0x33, 0x52, 0xF0,
+    0x15, 0x62, 0x72, 0xD1, 0x0A, 0x16, 0x24, 0x34,
+    0xE1, 0x25, 0xF1, 0x17, 0x18, 0x19, 0x1A, 0x26,
+    0x27, 0x28, 0x29, 0x2A, 0x35, 0x36, 0x37, 0x38,
+    0x39, 0x3A, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+    0x59, 0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+    0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
+    0x79, 0x7A, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+    0x88, 0x89, 0x8A, 0x92, 0x93, 0x94, 0x95, 0x96,
+    0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5,
+    0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4,
+    0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3,
+    0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2,
+    0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA,
+    0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9,
+    0xEA, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8,
+    0xF9, 0xFA,
+};
+
+fn buildEncodeTable(bits: []const u8, values: []const u8) JpegHuffmanTable {
+    var table = JpegHuffmanTable{
+        .codes = [_]u16{0} ** 256,
+        .code_lengths = [_]u8{0} ** 256,
+    };
+
+    var code: u16 = 0;
+    var index: usize = 0;
+    for (bits, 1..) |count, bit_length| {
+        for (0..count) |_| {
+            if (index >= values.len) break;
+            const symbol = values[index];
+            table.codes[symbol] = code;
+            table.code_lengths[symbol] = @intCast(bit_length);
+            code += 1;
+            index += 1;
+        }
+        code <<= 1;
+    }
+
+    return table;
+}
+
 pub const AnimatedImage = struct {
     allocator: std.mem.Allocator,
     frames: []Image,
@@ -254,9 +431,9 @@ pub const AnimatedImage = struct {
         _ = try file.write(&[_]u8{ height_bytes[0], height_bytes[1] });
 
         // Global color table info: 8-bit color resolution, global table, 256 colors
-        _ = try file.write(&[_]u8{ 0xF7 }); // 1111 0111 = global table + 8-bit + 256 colors
-        _ = try file.write(&[_]u8{ 0 });    // Background color index
-        _ = try file.write(&[_]u8{ 0 });    // Pixel aspect ratio
+        _ = try file.write(&[_]u8{0xF7}); // 1111 0111 = global table + 8-bit + 256 colors
+        _ = try file.write(&[_]u8{0}); // Background color index
+        _ = try file.write(&[_]u8{0}); // Pixel aspect ratio
 
         // Create and write basic 256-color palette
         var palette: [256 * 3]u8 = undefined;
@@ -294,22 +471,22 @@ pub const AnimatedImage = struct {
             var offset: usize = 0;
             while (remaining > 0) {
                 const block_size = @min(remaining, 255);
-                _ = try file.write(&[_]u8{ @intCast(block_size) });
+                _ = try file.write(&[_]u8{@intCast(block_size)});
                 for (0..block_size) |j| {
                     const idx = (offset + j) * 3;
                     if (idx + 2 < frame.data.len) {
                         const gray = @as(u8, @intFromFloat(@as(f32, @floatFromInt(frame.data[idx])) * 0.299 +
-                                                        @as(f32, @floatFromInt(frame.data[idx + 1])) * 0.587 +
-                                                        @as(f32, @floatFromInt(frame.data[idx + 2])) * 0.114));
-                        _ = try file.write(&[_]u8{ gray });
+                            @as(f32, @floatFromInt(frame.data[idx + 1])) * 0.587 +
+                            @as(f32, @floatFromInt(frame.data[idx + 2])) * 0.114));
+                        _ = try file.write(&[_]u8{gray});
                     } else {
-                        _ = try file.write(&[_]u8{ 0 });
+                        _ = try file.write(&[_]u8{0});
                     }
                 }
                 offset += block_size;
                 remaining -= block_size;
             }
-            _ = try file.write(&[_]u8{ 0 });
+            _ = try file.write(&[_]u8{0});
         }
 
         // Write trailer
@@ -444,27 +621,42 @@ pub const Image = struct {
             return error.InvalidFileFormat;
         }
 
-        if (std.mem.eql(u8, &sig_buf, &[_]u8{ 137, 80, 78, 71, 13, 10, 26, 10 })) {
+        if (bytes_read >= 8 and std.mem.eql(u8, sig_buf[0..8], &[_]u8{ 137, 80, 78, 71, 13, 10, 26, 10 })) {
             return loadPng(allocator, file);
-        } else if (std.mem.eql(u8, sig_buf[0..2], "\xFF\xD8")) {
+        }
+
+        if (bytes_read >= 2 and sig_buf[0] == 0xFF and sig_buf[1] == 0xD8) {
             return loadJpeg(allocator, file);
-        } else if (std.mem.eql(u8, sig_buf[0..4], "RIFF") and std.mem.eql(u8, sig_buf[8..12], "WEBP")) {
+        }
+
+        if (bytes_read >= 12 and std.mem.eql(u8, sig_buf[0..4], "RIFF") and std.mem.eql(u8, sig_buf[8..12], "WEBP")) {
             return loadWebP(allocator, file);
-        } else if ((std.mem.eql(u8, sig_buf[0..2], "II") and sig_buf[2] == 42) or
-                   (std.mem.eql(u8, sig_buf[0..2], "MM") and sig_buf[3] == 42)) {
+        }
+
+        if ((std.mem.eql(u8, sig_buf[0..2], "II") and sig_buf[2] == 42) or
+            (std.mem.eql(u8, sig_buf[0..2], "MM") and sig_buf[3] == 42))
+        {
             return loadTiff(allocator, file);
-        } else if (std.mem.eql(u8, sig_buf[0..6], "GIF87a") or std.mem.eql(u8, sig_buf[0..6], "GIF89a")) {
+        }
+
+        if (bytes_read >= 6 and (std.mem.eql(u8, sig_buf[0..6], "GIF87a") or std.mem.eql(u8, sig_buf[0..6], "GIF89a"))) {
             return loadGif(allocator, file);
-        } else if (std.mem.eql(u8, sig_buf[0..4], "\x00\x00\x00\x1c") and std.mem.eql(u8, sig_buf[4..12], "ftypavif")) {
+        }
+
+        if (bytes_read >= 12 and std.mem.eql(u8, sig_buf[0..4], "\x00\x00\x00\x1c") and std.mem.eql(u8, sig_buf[4..12], "ftypavif")) {
             return loadAvif(allocator, file);
-        } else if (std.mem.eql(u8, sig_buf[0..5], "<?xml") or std.mem.eql(u8, sig_buf[0..4], "<svg")) {
+        }
+
+        if ((bytes_read >= 5 and std.mem.eql(u8, sig_buf[0..5], "<?xml")) or (bytes_read >= 4 and std.mem.eql(u8, sig_buf[0..4], "<svg"))) {
             return loadSvgFile(allocator, file);
-        } else if (std.mem.eql(u8, sig_buf[0..2], "BM")) {
+        }
+
+        if (std.mem.eql(u8, sig_buf[0..2], "BM")) {
             try file.seekTo(0);
             return loadBmp(allocator, file);
-        } else {
-            return error.UnknownFormat;
         }
+
+        return error.UnknownFormat;
     }
 
     fn loadBmp(allocator: std.mem.Allocator, file: std.fs.File) !Image {
@@ -650,7 +842,7 @@ pub const Image = struct {
             if (scanline_start >= data.len) break;
 
             const filter_type = data[scanline_start];
-            const scanline_data = data[scanline_start + 1..@min(data.len, scanline_start + scanline_size)];
+            const scanline_data = data[scanline_start + 1 .. @min(data.len, scanline_start + scanline_size)];
 
             // Apply optimized PNG filter
             const row_start = row * @as(usize, width) * bytes_per_pixel;
@@ -658,14 +850,7 @@ pub const Image = struct {
             const copy_size = @min(scanline_data.len, row_bytes);
 
             if (row_start + copy_size <= result.len and copy_size > 0) {
-                optimizedPngFilter(
-                    result[row_start..row_start + copy_size],
-                    scanline_data[0..copy_size],
-                    filter_type,
-                    bytes_per_pixel,
-                    width,
-                    @intCast(row)
-                );
+                optimizedPngFilter(result[row_start .. row_start + copy_size], scanline_data[0..copy_size], filter_type, bytes_per_pixel, width, @intCast(row));
             }
         }
 
@@ -690,13 +875,12 @@ pub const Image = struct {
                     input_pos += 1;
                     if (input_pos + 4 < compressed.len) {
                         var len_buf: [2]u8 = undefined;
-                        @memcpy(&len_buf, compressed[input_pos..input_pos + 2]);
+                        @memcpy(&len_buf, compressed[input_pos .. input_pos + 2]);
                         const len = std.mem.readInt(u16, &len_buf, .little);
                         input_pos += 4; // Skip LEN and NLEN
 
                         const copy_len = @min(len, @min(compressed.len - input_pos, output.len - output_pos));
-                        @memcpy(output[output_pos..output_pos + copy_len],
-                               compressed[input_pos..input_pos + copy_len]);
+                        @memcpy(output[output_pos .. output_pos + copy_len], compressed[input_pos .. input_pos + copy_len]);
 
                         input_pos += copy_len;
                         output_pos += copy_len;
@@ -706,8 +890,7 @@ pub const Image = struct {
                 } else {
                     // For other block types, do simple copy for now
                     const copy_len = @min(compressed.len - input_pos, output.len - output_pos);
-                    @memcpy(output[output_pos..output_pos + copy_len],
-                           compressed[input_pos..input_pos + copy_len]);
+                    @memcpy(output[output_pos .. output_pos + copy_len], compressed[input_pos .. input_pos + copy_len]);
                     break;
                 }
             } else {
@@ -768,7 +951,7 @@ pub const Image = struct {
             else => {
                 // Unknown filter - copy as-is
                 @memcpy(output, input);
-            }
+            },
         }
     }
 
@@ -870,7 +1053,7 @@ pub const Image = struct {
         for (0..height) |y| {
             for (0..width) |x| {
                 const idx = (y * @as(usize, width) + x) * 3;
-                rgb_data[idx] = @intCast((x * 255) / width);     // R
+                rgb_data[idx] = @intCast((x * 255) / width); // R
                 rgb_data[idx + 1] = @intCast((y * 255) / height); // G
                 rgb_data[idx + 2] = 128; // B
             }
@@ -918,7 +1101,7 @@ pub const Image = struct {
         for (0..height) |y| {
             for (0..width) |x| {
                 const idx = (y * @as(usize, width) + x) * 3;
-                rgb_data[idx] = @intCast(255 - (x * 255) / width);     // R
+                rgb_data[idx] = @intCast(255 - (x * 255) / width); // R
                 rgb_data[idx + 1] = @intCast(255 - (y * 255) / height); // G
                 rgb_data[idx + 2] = 200; // B
             }
@@ -1036,7 +1219,7 @@ pub const Image = struct {
                 .Compression => compression = @intCast(value_offset & 0xFFFF),
                 .StripOffsets => strip_offsets = value_offset,
                 .StripByteCounts => strip_byte_counts = value_offset,
-                else => {}, // Skip unknown tags
+                else => {},
             }
         }
 
@@ -1119,7 +1302,7 @@ pub const Image = struct {
 
             // Convert to RGB palette
             for (0..global_color_table_size) |i| {
-                palette[i][0] = palette_data[i * 3];     // R
+                palette[i][0] = palette_data[i * 3]; // R
                 palette[i][1] = palette_data[i * 3 + 1]; // G
                 palette[i][2] = palette_data[i * 3 + 2]; // B
             }
@@ -1154,7 +1337,7 @@ pub const Image = struct {
                 },
                 else => {
                     return error.InvalidGIFData;
-                }
+                },
             }
         }
 
@@ -1234,7 +1417,7 @@ pub const Image = struct {
 
         for (0..pixel_count) |i| {
             const palette_index = index_data[i];
-            rgb_data[i * 3] = active_palette[palette_index][0];     // R
+            rgb_data[i * 3] = active_palette[palette_index][0]; // R
             rgb_data[i * 3 + 1] = active_palette[palette_index][1]; // G
             rgb_data[i * 3 + 2] = active_palette[palette_index][2]; // B
         }
@@ -1280,7 +1463,7 @@ pub const Image = struct {
 
         // Initialize dictionary with single-character strings
         for (0..clear_code) |i| {
-            dictionary[i] = dict_storage[storage_pos..storage_pos+1];
+            dictionary[i] = dict_storage[storage_pos .. storage_pos + 1];
             dict_storage[storage_pos] = @as(u8, @intCast(i));
             storage_pos += 1;
         }
@@ -1330,8 +1513,8 @@ pub const Image = struct {
 
                 // Create new string: old_string + first_char
                 if (storage_pos + old_string.len + 1 < dict_storage.len) {
-                    dictionary[next_code] = dict_storage[storage_pos..storage_pos + old_string.len + 1];
-                    @memcpy(dict_storage[storage_pos..storage_pos + old_string.len], old_string);
+                    dictionary[next_code] = dict_storage[storage_pos .. storage_pos + old_string.len + 1];
+                    @memcpy(dict_storage[storage_pos .. storage_pos + old_string.len], old_string);
                     dict_storage[storage_pos + old_string.len] = first_char;
                     storage_pos += old_string.len + 1;
 
@@ -1345,15 +1528,15 @@ pub const Image = struct {
 
             // Output string
             const copy_len = @min(string_to_output.len, output.len - output_pos);
-            @memcpy(output[output_pos..output_pos + copy_len], string_to_output[0..copy_len]);
+            @memcpy(output[output_pos .. output_pos + copy_len], string_to_output[0..copy_len]);
             output_pos += copy_len;
 
             // Add new string to dictionary
             if (old_code != null and next_code < 4096) {
                 const old_string = dictionary[old_code.?];
                 if (storage_pos + old_string.len + 1 < dict_storage.len) {
-                    dictionary[next_code] = dict_storage[storage_pos..storage_pos + old_string.len + 1];
-                    @memcpy(dict_storage[storage_pos..storage_pos + old_string.len], old_string);
+                    dictionary[next_code] = dict_storage[storage_pos .. storage_pos + old_string.len + 1];
+                    @memcpy(dict_storage[storage_pos .. storage_pos + old_string.len], old_string);
                     dict_storage[storage_pos + old_string.len] = first_char;
                     storage_pos += old_string.len + 1;
                     next_code += 1;
@@ -1421,8 +1604,8 @@ pub const Image = struct {
                 const g = image.data[i * bytes_per_pixel + 1];
                 const b = image.data[i * bytes_per_pixel + 2];
                 index_data[i] = @intFromFloat(@as(f32, @floatFromInt(r)) * 0.299 +
-                                            @as(f32, @floatFromInt(g)) * 0.587 +
-                                            @as(f32, @floatFromInt(b)) * 0.114);
+                    @as(f32, @floatFromInt(g)) * 0.587 +
+                    @as(f32, @floatFromInt(b)) * 0.114);
             }
         }
 
@@ -1430,12 +1613,12 @@ pub const Image = struct {
         var offset: usize = 0;
         while (remaining > 0) {
             const block_size = @min(remaining, 255);
-            _ = try file.write(&[_]u8{ @intCast(block_size) });
-            _ = try file.write(index_data[offset..offset + block_size]);
+            _ = try file.write(&[_]u8{@intCast(block_size)});
+            _ = try file.write(index_data[offset .. offset + block_size]);
             offset += block_size;
             remaining -= block_size;
         }
-        _ = try file.write(&[_]u8{ 0 });
+        _ = try file.write(&[_]u8{0});
     }
 
     fn loadAvif(allocator: std.mem.Allocator, file: std.fs.File) !Image {
@@ -1485,9 +1668,9 @@ pub const Image = struct {
             _ = try file.read(palette_data);
 
             for (0..global_color_table_size) |i| {
-                palette[i][0] = palette_data[i * 3];
-                palette[i][1] = palette_data[i * 3 + 1];
-                palette[i][2] = palette_data[i * 3 + 2];
+                palette[i][0] = palette_data[i * 3]; // R
+                palette[i][1] = palette_data[i * 3 + 1]; // G
+                palette[i][2] = palette_data[i * 3 + 2]; // B
             }
         } else {
             // Default grayscale palette
@@ -1547,7 +1730,7 @@ pub const Image = struct {
                         else => {
                             // Other extensions - skip
                             try skipGifDataSubBlocks(file);
-                        }
+                        },
                     }
                 },
                 0x2C => {
@@ -1562,7 +1745,7 @@ pub const Image = struct {
                 },
                 else => {
                     return error.InvalidGIFData;
-                }
+                },
             }
         }
 
@@ -1624,7 +1807,7 @@ pub const Image = struct {
             return error.InvalidJPEG;
         }
 
-        var quantization_tables: [4][64]u8 = undefined;
+        var quantization_tables: [4][64]u16 = undefined;
         var huffman_tables: [4]HuffmanTable = undefined;
         var frame_header: FrameHeader = undefined;
         var has_frame_header = false;
@@ -1649,10 +1832,7 @@ pub const Image = struct {
                     frame_header = try parseSOF0(file);
                     has_frame_header = true;
                 },
-                0xC2 => { // SOF2 - Progressive JPEG
-                    frame_header = try parseSOF0(file);
-                    has_frame_header = true;
-                },
+                0xC2 => return error.UnsupportedProgressiveJPEG,
                 SOS => break,
                 else => try skipSegment(file),
             }
@@ -1682,7 +1862,7 @@ pub const Image = struct {
         try file.seekBy(length - 2);
     }
 
-    fn parseDQT(file: std.fs.File, tables: *[4][64]u8) !void {
+    fn parseDQT(file: std.fs.File, tables: *[4][64]u16) !void {
         var length_buf: [2]u8 = undefined;
         _ = try file.read(&length_buf);
         const length = std.mem.readInt(u16, &length_buf, .big) - 2;
@@ -1700,7 +1880,12 @@ pub const Image = struct {
 
             if (precision != 0) return error.UnsupportedPrecision;
 
-            @memcpy(&tables[table_id], data[offset .. offset + 64].ptr);
+            const table_ptr = &tables[table_id];
+            if (offset + 64 > length) return error.DQTTooLarge;
+            for (0..64) |i| {
+                const zigzag_index = zigzag_order[i];
+                table_ptr[zigzag_index] = data[offset + i];
+            }
             offset += 64;
         }
     }
@@ -1749,6 +1934,7 @@ pub const Image = struct {
 
             // Generate codes for each bit length
             for (1..17) |bit_length| {
+                code <<= 1;
                 const num_codes = lengths[bit_length - 1];
                 for (0..num_codes) |_| {
                     if (symbol_index >= total_values) break;
@@ -1757,7 +1943,6 @@ pub const Image = struct {
                     code += 1;
                     symbol_index += 1;
                 }
-                code <<= 1; // Left shift for next bit length
             }
 
             const table_index = table_id + table_class * 2;
@@ -1794,10 +1979,12 @@ pub const Image = struct {
 
         const num_components = data[5];
 
-        if (num_components != 3) return error.UnsupportedComponents;
+        if (num_components == 0 or num_components > 3) {
+            return error.UnsupportedComponents;
+        }
 
-        var components: [3]Component = undefined;
-        for (0..3) |i| {
+        var components = std.mem.zeroes([3]Component);
+        for (0..num_components) |i| {
             const offset = 6 + i * 3;
             components[i] = Component{
                 .id = data[offset],
@@ -1810,6 +1997,7 @@ pub const Image = struct {
         return FrameHeader{
             .width = width,
             .height = height,
+            .component_count = num_components,
             .components = components,
         };
     }
@@ -1824,10 +2012,10 @@ pub const Image = struct {
         _ = try file.read(data[0 .. length - 2]);
 
         const num_components = data[0];
-        if (num_components != 3) return error.UnsupportedComponents;
+        if (num_components == 0 or num_components > 3) return error.UnsupportedComponents;
 
-        var components: [3]ScanComponent = undefined;
-        for (0..3) |i| {
+        var components = std.mem.zeroes([3]ScanComponent);
+        for (0..num_components) |i| {
             const offset = 1 + i * 2;
             components[i] = ScanComponent{
                 .id = data[offset],
@@ -1841,6 +2029,7 @@ pub const Image = struct {
         const approximation = data[9];
 
         return ScanHeader{
+            .component_count = num_components,
             .components = components,
             .start_spectral = start_spectral,
             .end_spectral = end_spectral,
@@ -1848,9 +2037,22 @@ pub const Image = struct {
         };
     }
 
-    fn decodeImageData(allocator: std.mem.Allocator, file: std.fs.File, frame: FrameHeader, scan: ScanHeader, qt: [4][64]u8, ht: [4]HuffmanTable) ![]u8 {
+    fn decodeImageData(allocator: std.mem.Allocator, file: std.fs.File, frame: FrameHeader, scan: ScanHeader, qt: [4][64]u16, ht: [4]HuffmanTable) ![]u8 {
+        if (scan.component_count != frame.component_count) {
+            return error.ComponentMismatch;
+        }
 
-        // Read all entropy-coded data until EOI
+        const approx_high = (scan.approximation >> 4) & 0x0F;
+        const approx_low = scan.approximation & 0x0F;
+        if (scan.start_spectral != 0 or scan.end_spectral != 63 or approx_high != 0 or approx_low != 0) {
+            return error.UnsupportedScanParameters;
+        }
+
+        if (frame.component_count != 1 and frame.component_count != 3) {
+            return error.UnsupportedComponents;
+        }
+
+        // Read entropy coded segment
         var entropy_data = std.ArrayListUnmanaged(u8){};
         defer entropy_data.deinit(allocator);
 
@@ -1860,271 +2062,361 @@ pub const Image = struct {
             if (bytes_read == 0) break;
 
             if (byte[0] == 0xFF) {
-                const next_byte_result = try file.read(&byte);
-                if (next_byte_result == 0) break;
-                if (byte[0] == 0x00) {
-                    // Byte stuffing: FF 00 means a literal FF byte
-                    try entropy_data.append(allocator, 0xFF);
-                } else if (byte[0] == 0xD9) {
-                    // EOI marker - end of image data
-                    break;
-                } else {
-                    // Other marker - end of entropy data
-                    break;
+                const next_byte_count = try file.read(&byte);
+                if (next_byte_count == 0) break;
+
+                switch (byte[0]) {
+                    0x00 => try entropy_data.append(allocator, 0xFF),
+                    0xD9 => break,
+                    0xD0...0xD7 => return error.UnsupportedRestartMarkers,
+                    0xFF => continue,
+                    else => return error.UnexpectedMarker,
                 }
             } else {
                 try entropy_data.append(allocator, byte[0]);
             }
         }
 
-        // Initialize bit reader
+        // Initialise readers and sampling information
         var bit_reader = BitReader.init(entropy_data.items);
 
-        // Decode MCU (Minimum Coded Unit) - for baseline JPEG, this is 8x8 for each component
-        const mcu_width = (frame.width + 7) / 8;
-        const mcu_height = (frame.height + 7) / 8;
-        const total_mcus = mcu_width * mcu_height;
-
-        // Allocate space for decoded coefficients
-        var y_coefficients = try allocator.alloc([64]i16, total_mcus);
-        defer allocator.free(y_coefficients);
-        var cb_coefficients = try allocator.alloc([64]i16, total_mcus);
-        defer allocator.free(cb_coefficients);
-        var cr_coefficients = try allocator.alloc([64]i16, total_mcus);
-        defer allocator.free(cr_coefficients);
-
-        // DC prediction values
-        var dc_y: i16 = 0;
-        var dc_cb: i16 = 0;
-        var dc_cr: i16 = 0;
-
-        // Decode each MCU (limit for MVP to avoid running out of data)
-        const max_mcus = @min(total_mcus, 100); // Process only first 100 MCUs for MVP
-        for (0..max_mcus) |mcu_index| {
-            // Decode Y component with error handling
-            dc_y = decodeBlock(&bit_reader, &ht[scan.components[0].dc_table_id], &ht[scan.components[0].ac_table_id], &y_coefficients[mcu_index], dc_y) catch |err| {
-                if (err == error.EndOfData or err == error.InvalidHuffmanCode) {
-                    std.debug.print("Stopped decoding at MCU {} due to: {}\n", .{ mcu_index, err });
-                    break;
-                } else {
-                    return err;
-                }
-            };
-            // Dequantize Y
-            dequantizeBlock(&y_coefficients[mcu_index], &qt[frame.components[0].quant_table_id]);
-
-            // Decode Cb component
-            dc_cb = decodeBlock(&bit_reader, &ht[scan.components[1].dc_table_id], &ht[scan.components[1].ac_table_id], &cb_coefficients[mcu_index], dc_cb) catch |err| {
-                if (err == error.EndOfData or err == error.InvalidHuffmanCode) {
-                    std.debug.print("Stopped decoding at MCU {} Cb due to: {}\n", .{ mcu_index, err });
-                    break;
-                } else {
-                    return err;
-                }
-            };
-            // Dequantize Cb
-            dequantizeBlock(&cb_coefficients[mcu_index], &qt[frame.components[1].quant_table_id]);
-
-            // Decode Cr component
-            dc_cr = decodeBlock(&bit_reader, &ht[scan.components[2].dc_table_id], &ht[scan.components[2].ac_table_id], &cr_coefficients[mcu_index], dc_cr) catch |err| {
-                if (err == error.EndOfData or err == error.InvalidHuffmanCode) {
-                    std.debug.print("Stopped decoding at MCU {} Cr due to: {}\n", .{ mcu_index, err });
-                    break;
-                } else {
-                    return err;
-                }
-            };
-            // Dequantize Cr
-            dequantizeBlock(&cr_coefficients[mcu_index], &qt[frame.components[2].quant_table_id]);
+        var max_h: u8 = 0;
+        var max_v: u8 = 0;
+        for (0..frame.component_count) |i| {
+            const comp = frame.components[i];
+            if (comp.h_sampling == 0 or comp.v_sampling == 0 or comp.h_sampling > 4 or comp.v_sampling > 4) {
+                return error.InvalidSamplingFactor;
+            }
+            max_h = if (comp.h_sampling > max_h) comp.h_sampling else max_h;
+            max_v = if (comp.v_sampling > max_v) comp.v_sampling else max_v;
         }
 
-        // Apply IDCT to all blocks and convert YUV to RGB
-        const rgb_data = try allocator.alloc(u8, @as(usize, frame.width) * frame.height * 3);
-        errdefer allocator.free(rgb_data);
+        if (max_h == 0 or max_v == 0) return error.InvalidSamplingFactor;
 
-        // Process each MCU and convert to spatial domain
-        for (0..mcu_height) |mcu_y| {
-            for (0..mcu_width) |mcu_x| {
-                const mcu_index = mcu_y * mcu_width + mcu_x;
+        const mcu_cols = (@as(usize, frame.width) + @as(usize, max_h) * 8 - 1) / (@as(usize, max_h) * 8);
+        const mcu_rows = (@as(usize, frame.height) + @as(usize, max_v) * 8 - 1) / (@as(usize, max_v) * 8);
 
-                // Apply IDCT to each component
-                var y_spatial: [64]i16 = undefined;
-                var cb_spatial: [64]i16 = undefined;
-                var cr_spatial: [64]i16 = undefined;
+        const ComponentState = struct {
+            h_sampling: u8,
+            v_sampling: u8,
+            plane_width: usize,
+            plane_height: usize,
+            plane: []u8,
+            quant_table_id: u8,
+            dc_pred: i16,
+            block_cols: usize,
+            block_rows: usize,
+        };
 
-                idct8x8(&y_coefficients[mcu_index], &y_spatial);
-                idct8x8(&cb_coefficients[mcu_index], &cb_spatial);
-                idct8x8(&cr_coefficients[mcu_index], &cr_spatial);
+        var component_states = std.mem.zeroes([3]ComponentState);
+        defer {
+            for (0..frame.component_count) |i| {
+                if (component_states[i].plane.len != 0) {
+                    allocator.free(component_states[i].plane);
+                }
+            }
+        }
 
-                // Convert 8x8 block from YUV to RGB
-                for (0..8) |block_y| {
-                    for (0..8) |block_x| {
-                        const pixel_x = mcu_x * 8 + block_x;
-                        const pixel_y = mcu_y * 8 + block_y;
+        for (0..frame.component_count) |i| {
+            const comp = frame.components[i];
+            if (@as(usize, comp.quant_table_id) >= qt.len) return error.InvalidQuantizationTable;
 
-                        if (pixel_x < frame.width and pixel_y < frame.height) {
-                            const spatial_index = block_y * 8 + block_x;
-                            const y_val = @min(255, @max(0, @as(i32, y_spatial[spatial_index]) + 128)); // Clamp and shift
-                            const cb_val = cb_spatial[spatial_index];
-                            const cr_val = cr_spatial[spatial_index];
+            const plane_width = (@as(usize, frame.width) * @as(usize, comp.h_sampling) + @as(usize, max_h) - 1) / @as(usize, max_h);
+            const plane_height = (@as(usize, frame.height) * @as(usize, comp.v_sampling) + @as(usize, max_v) - 1) / @as(usize, max_v);
+            const plane_size = plane_width * plane_height;
 
-                            // Convert YUV to RGB
-                            const rgb = yuvToRgb(@intCast(y_val), cb_val, cr_val);
+            const plane = try allocator.alloc(u8, plane_size);
+            @memset(plane, 0);
 
-                            const pixel_index = (pixel_y * @as(usize, frame.width) + pixel_x) * 3;
-                            rgb_data[pixel_index] = rgb[0];
-                            rgb_data[pixel_index + 1] = rgb[1];
-                            rgb_data[pixel_index + 2] = rgb[2];
+            const block_cols = if (plane_width == 0) 0 else (plane_width + 7) / 8;
+            const block_rows = if (plane_height == 0) 0 else (plane_height + 7) / 8;
+
+            component_states[i] = ComponentState{
+                .h_sampling = comp.h_sampling,
+                .v_sampling = comp.v_sampling,
+                .plane_width = plane_width,
+                .plane_height = plane_height,
+                .plane = plane,
+                .quant_table_id = comp.quant_table_id,
+                .dc_pred = 0,
+                .block_cols = block_cols,
+                .block_rows = block_rows,
+            };
+        }
+
+        // Map scan components to frame components
+        var scan_to_frame: [3]usize = undefined;
+        for (0..scan.component_count) |i| {
+            const scan_comp = scan.components[i];
+            var found = false;
+            for (0..frame.component_count) |j| {
+                if (frame.components[j].id == scan_comp.id) {
+                    scan_to_frame[i] = j;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return error.InvalidScanComponent;
+        }
+
+        // Decode MCUs
+        for (0..mcu_rows) |mcu_y| {
+            for (0..mcu_cols) |mcu_x| {
+                for (0..scan.component_count) |scan_index| {
+                    const scan_comp = scan.components[scan_index];
+                    const frame_index = scan_to_frame[scan_index];
+                    const state = &component_states[frame_index];
+
+                    const dc_index = @as(usize, scan_comp.dc_table_id);
+                    const ac_index = 2 + @as(usize, scan_comp.ac_table_id);
+                    if (dc_index >= ht.len or ac_index >= ht.len) {
+                        return error.InvalidHuffmanTableIndex;
+                    }
+                    const dc_table = &ht[dc_index];
+                    const ac_table = &ht[ac_index];
+                    const quant_table = &qt[@as(usize, state.quant_table_id)];
+
+                    for (0..@as(usize, state.v_sampling)) |v_block| {
+                        for (0..@as(usize, state.h_sampling)) |h_block| {
+                            var dct_coeffs: [64]i32 = undefined;
+                            var spatial: [64]i32 = undefined;
+                            state.dc_pred = try decodeBlock(&bit_reader, dc_table, ac_table, &dct_coeffs, state.dc_pred);
+                            dequantizeBlock(&dct_coeffs, quant_table);
+                            idct8x8(&dct_coeffs, &spatial);
+
+                            const block_x = (@as(usize, mcu_x) * @as(usize, state.h_sampling) + @as(usize, h_block)) * 8;
+                            const block_y = (@as(usize, mcu_y) * @as(usize, state.v_sampling) + @as(usize, v_block)) * 8;
+                            storeBlockToPlane(state.plane, state.plane_width, state.plane_height, &spatial, block_x, block_y);
                         }
                     }
                 }
             }
         }
 
+        const frame_width_usize = @as(usize, frame.width);
+        const frame_height_usize = @as(usize, frame.height);
+        const rgb_size = frame_width_usize * frame_height_usize * 3;
+        const rgb_data = try allocator.alloc(u8, rgb_size);
+        errdefer allocator.free(rgb_data);
+
+        if (frame.component_count == 1) {
+            const y_plane = component_states[0].plane;
+            const plane_width = component_states[0].plane_width;
+            const plane_height = component_states[0].plane_height;
+            for (0..frame_height_usize) |y| {
+                const sample_row = (y * plane_height) / frame_height_usize;
+                for (0..frame_width_usize) |x| {
+                    const sample_col = (x * plane_width) / frame_width_usize;
+                    const luminance = y_plane[sample_row * plane_width + sample_col];
+                    const idx = (y * frame_width_usize + x) * 3;
+                    rgb_data[idx] = luminance;
+                    rgb_data[idx + 1] = luminance;
+                    rgb_data[idx + 2] = luminance;
+                }
+            }
+            return rgb_data;
+        }
+
+        var y_index: ?usize = null;
+        var cb_index: ?usize = null;
+        var cr_index: ?usize = null;
+        for (0..frame.component_count) |i| {
+            switch (frame.components[i].id) {
+                1 => y_index = i,
+                2 => cb_index = i,
+                3 => cr_index = i,
+                else => {},
+            }
+        }
+
+        if (y_index == null or cb_index == null or cr_index == null) {
+            return error.UnsupportedColorComponents;
+        }
+
+        const y_plane = component_states[y_index.?].plane;
+        const y_width = component_states[y_index.?].plane_width;
+        const y_height = component_states[y_index.?].plane_height;
+
+        const cb_plane = component_states[cb_index.?].plane;
+        const cb_width = component_states[cb_index.?].plane_width;
+        const cb_height = component_states[cb_index.?].plane_height;
+
+        const cr_plane = component_states[cr_index.?].plane;
+        const cr_width = component_states[cr_index.?].plane_width;
+        const cr_height = component_states[cr_index.?].plane_height;
+
+        for (0..frame_height_usize) |y| {
+            const y_row = if (y_height == frame_height_usize) y else (y * y_height) / frame_height_usize;
+            const cb_row = (y * cb_height) / frame_height_usize;
+            const cr_row = (y * cr_height) / frame_height_usize;
+
+            for (0..frame_width_usize) |x| {
+                const y_col = if (y_width == frame_width_usize) x else (x * y_width) / frame_width_usize;
+                const cb_col = (x * cb_width) / frame_width_usize;
+                const cr_col = (x * cr_width) / frame_width_usize;
+
+                const y_sample = y_plane[y_row * y_width + y_col];
+                const cb_sample = cb_plane[cb_row * cb_width + cb_col];
+                const cr_sample = cr_plane[cr_row * cr_width + cr_col];
+                const rgb = yuvToRgb(@as(i32, y_sample), @as(i32, cb_sample) - 128, @as(i32, cr_sample) - 128);
+                const idx = (y * frame_width_usize + x) * 3;
+                rgb_data[idx] = rgb[0];
+                rgb_data[idx + 1] = rgb[1];
+                rgb_data[idx + 2] = rgb[2];
+            }
+        }
+
         return rgb_data;
     }
 
-    fn decodeBlock(bit_reader: *BitReader, dc_table: *const HuffmanTable, ac_table: *const HuffmanTable, block: *[64]i16, prev_dc: i16) !i16 {
-        // Initialize block to zeros
-        for (0..64) |i| {
-            block[i] = 0;
-        }
+    fn decodeBlock(bit_reader: *BitReader, dc_table: *const HuffmanTable, ac_table: *const HuffmanTable, block: *[64]i32, prev_dc: i16) !i16 {
+        @memset(block, 0);
 
-        // Decode DC coefficient
-        const dc_code = try decodeHuffmanValue(bit_reader, dc_table);
-        const dc_bits = try bit_reader.readBits(@intCast(dc_code));
-        const dc_diff = try decodeZigzag(dc_bits, dc_code);
+        const dc_symbol = try decodeHuffmanValue(bit_reader, dc_table);
+        if (dc_symbol > 11) return error.InvalidHuffmanCode;
+        const dc_bits = if (dc_symbol == 0) 0 else try bit_reader.readBits(@intCast(dc_symbol));
+        const dc_diff = receiveExtend(dc_bits, @intCast(dc_symbol));
         const dc_value = prev_dc + dc_diff;
-        block[0] = dc_value;
+        block[0] = @as(i32, dc_value);
 
-        // Decode AC coefficients (simplified - skip on error for MVP)
         var k: usize = 1;
         while (k < 64) {
-            const ac_symbol = decodeHuffmanValue(bit_reader, ac_table) catch |err| {
-                if (err == error.InvalidHuffmanCode) {
-                    // Skip rest of AC coefficients for this block
-                    break;
-                } else {
-                    return err;
-                }
-            };
+            const ac_symbol = try decodeHuffmanValue(bit_reader, ac_table);
 
             if (ac_symbol == 0x00) {
-                // End of block
                 break;
             }
 
-            const run_length = (ac_symbol >> 4) & 0x0F;
-            const category = ac_symbol & 0x0F;
-
-            // Skip run_length zeros
-            k += run_length;
-
-            if (k >= 64) break;
-
-            if (category > 0) {
-                const ac_bits = try bit_reader.readBits(@intCast(category));
-                const ac_value = try decodeZigzag(ac_bits, category);
-                block[k] = ac_value;
+            if (ac_symbol == 0xF0) {
+                k += 16;
+                if (k >= 64) break;
+                continue;
             }
 
+            const run_length = (ac_symbol >> 4) & 0x0F;
+            const size = ac_symbol & 0x0F;
+
+            k += run_length;
+            if (k >= 64) break;
+
+            if (size == 0) return error.InvalidHuffmanCode;
+            const ac_bits = try bit_reader.readBits(@intCast(size));
+            const ac_value = receiveExtend(ac_bits, size);
+            const index = zigzag_order[k];
+            block[index] = @as(i32, ac_value);
             k += 1;
         }
 
         return dc_value;
     }
 
-    fn dequantizeBlock(block: *[64]i16, quantization_table: *const [64]u8) void {
+    fn dequantizeBlock(block: *[64]i32, quantization_table: *const [64]u16) void {
         for (0..64) |i| {
-            block[i] = block[i] * @as(i16, quantization_table[i]);
+            block[i] = block[i] * @as(i32, @intCast(quantization_table[i]));
         }
     }
 
-    // Zigzag order for DCT coefficients
-    const zigzag_order = [64]u8{
-        0,  1,  8,  16, 9,  2,  3,  10,
-        17, 24, 32, 25, 18, 11, 4,  5,
-        12, 19, 26, 33, 40, 48, 41, 34,
-        27, 20, 13, 6,  7,  14, 21, 28,
-        35, 42, 49, 56, 57, 50, 43, 36,
-        29, 22, 15, 23, 30, 37, 44, 51,
-        58, 59, 52, 45, 38, 31, 39, 46,
-        53, 60, 61, 54, 47, 55, 62, 63
-    };
+    fn receiveExtend(value: u16, size: u8) i16 {
+        if (size == 0) return 0;
 
-    fn idct8x8(coeffs: *const [64]i16, output: *[64]i16) void {
-        // First pass: process rows
-        var temp: [64]i16 = undefined;
+        const shift_minus_one = @as(u5, @intCast(size - 1));
+        const threshold = @as(i32, 1) << shift_minus_one;
+        var result = @as(i32, @intCast(value));
+        if (result < threshold) {
+            const full_range = (@as(i32, 1) << @as(u5, @intCast(size))) - 1;
+            result -= full_range;
+        }
+        return @intCast(result);
+    }
+
+    fn storeBlockToPlane(plane: []u8, plane_width: usize, plane_height: usize, block: *const [64]i32, block_x: usize, block_y: usize) void {
         for (0..8) |row| {
-            const row_offset = row * 8;
-            var row_input: [8]i16 = undefined;
-            var row_output: [8]i16 = undefined;
+            const dest_y = block_y + row;
+            if (dest_y >= plane_height) continue;
+            for (0..8) |col| {
+                const dest_x = block_x + col;
+                if (dest_x >= plane_width) continue;
 
-            // Copy row data
+                var value = block[row * 8 + col] + 128;
+                if (value < 0) value = 0;
+                if (value > 255) value = 255;
+
+                plane[dest_y * plane_width + dest_x] = @intCast(value);
+            }
+        }
+    }
+
+    const IDCT_SCALE = 14;
+
+    fn buildIdctMatrix() [8][8]i32 {
+        var matrix: [8][8]i32 = undefined;
+        const pi = std.math.pi;
+        for (0..8) |u| {
+            const cu = if (u == 0) 1.0 / std.math.sqrt(2.0) else 1.0;
+            for (0..8) |x| {
+                const angle = ((2.0 * @as(f64, @floatFromInt(x)) + 1.0) * @as(f64, @floatFromInt(u)) * pi) / 16.0;
+                const value = 0.5 * cu * std.math.cos(angle);
+                matrix[u][x] = @intFromFloat(std.math.round(value * @as(f64, @floatFromInt(1 << IDCT_SCALE))));
+            }
+        }
+        return matrix;
+    }
+
+    const idct_matrix = buildIdctMatrix();
+
+    fn idct1dInt(input: []const i32, output: []i32) void {
+        for (0..8) |x| {
+            var sum: i64 = 0;
+            for (0..8) |u| {
+                sum += @as(i64, input[u]) * @as(i64, idct_matrix[u][x]);
+            }
+            const rounded = sum + (@as(i64, 1) << (IDCT_SCALE - 1));
+            output[x] = @intCast(rounded >> IDCT_SCALE);
+        }
+    }
+
+    fn idct8x8(coeffs: *const [64]i32, output: *[64]i32) void {
+        var temp: [64]i32 = undefined;
+
+        for (0..8) |row| {
+            var row_input: [8]i32 = undefined;
             for (0..8) |i| {
-                row_input[i] = coeffs[row_offset + i];
+                row_input[i] = coeffs.*[row * 8 + i];
             }
 
-            idct1d(&row_input, &row_output);
+            var row_output: [8]i32 = undefined;
+            idct1dInt(row_input[0..], row_output[0..]);
 
-            // Copy back
             for (0..8) |i| {
-                temp[row_offset + i] = row_output[i];
+                temp[row * 8 + i] = row_output[i];
             }
         }
 
-        // Second pass: process columns
         for (0..8) |col| {
-            var column: [8]i16 = undefined;
-            var result: [8]i16 = undefined;
-
-            // Extract column
+            var column_input: [8]i32 = undefined;
             for (0..8) |row| {
-                column[row] = temp[row * 8 + col];
+                column_input[row] = temp[row * 8 + col];
             }
 
-            // IDCT on column
-            idct1d(&column, &result);
+            var column_output: [8]i32 = undefined;
+            idct1dInt(column_input[0..], column_output[0..]);
 
-            // Store back
             for (0..8) |row| {
-                output[row * 8 + col] = result[row];
+                output.*[row * 8 + col] = column_output[row];
             }
         }
     }
 
-    fn idct1d(input: []const i16, output: []i16) void {
-        // Simplified 1D IDCT - basic implementation
-        // For production, would use optimized version with precomputed constants
-        const PI = 3.14159265359;
-
-        for (0..8) |n| {
-            var sum: f32 = 0.0;
-
-            for (0..8) |k| {
-                const c: f32 = if (k == 0) 0.707107 else 1.0; // 1/sqrt(2) for k=0
-                const angle = PI * @as(f32, @floatFromInt(2 * n + 1)) * @as(f32, @floatFromInt(k)) / 16.0;
-                sum += c * @as(f32, @floatFromInt(input[k])) * @cos(angle);
-            }
-
-            // Clamp to reasonable range for i16
-            const result = @min(32767, @max(-32768, sum / 2.0));
-            output[n] = @intFromFloat(result);
-        }
-    }
-
-    fn yuvToRgb(y: u8, cb: i16, cr: i16) [3]u8 {
-        // Convert YUV to RGB using JPEG standard
+    fn yuvToRgb(y: i32, cb: i32, cr: i32) [3]u8 {
         const y_f = @as(f32, @floatFromInt(y));
         const cb_f = @as(f32, @floatFromInt(cb));
         const cr_f = @as(f32, @floatFromInt(cr));
 
-        // JPEG YUV to RGB conversion
         const r = y_f + 1.402 * cr_f;
         const g = y_f - 0.344136 * cb_f - 0.714136 * cr_f;
         const b = y_f + 1.772 * cb_f;
 
-        // Clamp to 0-255 range
+        // Clamp values
         const r_clamped = @min(255, @max(0, @as(i32, @intFromFloat(r))));
         const g_clamped = @min(255, @max(0, @as(i32, @intFromFloat(g))));
         const b_clamped = @min(255, @max(0, @as(i32, @intFromFloat(b))));
@@ -2150,27 +2442,14 @@ pub const Image = struct {
             for (0..num_symbols) |i| {
                 const symbol_index = start_index + i;
                 if (table.codes[symbol_index] == code and
-                    table.code_lengths[symbol_index] == bit_length) {
+                    table.code_lengths[symbol_index] == bit_length)
+                {
                     return table.values[symbol_index];
                 }
             }
         }
 
         return error.InvalidHuffmanCode;
-    }
-
-    fn decodeZigzag(value: u16, bits: u8) !i16 {
-        if (bits == 0) return 0;
-
-        const bits_u4 = @as(u4, @intCast(bits - 1));
-        const sign_bit = (value >> bits_u4) & 1;
-        const magnitude = value & ((@as(u16, 1) << bits_u4) - 1);
-
-        if (sign_bit == 0) {
-            return @intCast(magnitude);
-        } else {
-            return -@as(i16, @intCast(magnitude + 1));
-        }
     }
 
     pub fn save(self: Image, path: []const u8, format: ImageFormat) !void {
@@ -2198,6 +2477,7 @@ pub const Image = struct {
         switch (format) {
             .bmp => try self.saveBmp(path),
             .png => try self.savePng(path),
+            .jpeg => try self.saveJpeg(path),
             .webp => try self.saveWebP(path),
             else => return error.UnsupportedFormat,
         }
@@ -2243,7 +2523,7 @@ pub const Image = struct {
                 for (0..4) |i| {
                     const src_x = @as(f32, @floatFromInt(x + i)) * x_scale;
                     const x1 = @as(u32, @intFromFloat(@floor(src_x)));
-                    const x2 = @min(x1 + 1, self.width - 1);
+                    const x2 = x1 + 1;
                     const dx = src_x - @as(f32, @floatFromInt(x1));
 
                     const dst_idx = (y * new_width + x + i) * bytes_per_pixel;
@@ -2270,7 +2550,7 @@ pub const Image = struct {
             while (x < new_width) {
                 const src_x = @as(f32, @floatFromInt(x)) * x_scale;
                 const x1 = @as(u32, @intFromFloat(@floor(src_x)));
-                const x2 = @min(x1 + 1, self.width - 1);
+                const x2 = x1 + 1;
                 const dx = src_x - @as(f32, @floatFromInt(x1));
 
                 const dst_idx = (y * new_width + x) * bytes_per_pixel;
@@ -2329,8 +2609,7 @@ pub const Image = struct {
             const dst_start = row * width * bytes_per_pixel;
             const row_bytes = width * bytes_per_pixel;
 
-            @memcpy(new_data[dst_start..dst_start + row_bytes],
-                   self.data[src_start..src_start + row_bytes]);
+            @memcpy(new_data[dst_start .. dst_start + row_bytes], self.data[src_start .. src_start + row_bytes]);
         }
 
         self.allocator.free(self.data);
@@ -2379,8 +2658,8 @@ pub const Image = struct {
             const b = self.data[i * 3 + 2];
             // ITU-R BT.709 luma coefficients
             new_data[i] = @intFromFloat(0.2126 * @as(f32, @floatFromInt(r)) +
-                                      0.7152 * @as(f32, @floatFromInt(g)) +
-                                      0.0722 * @as(f32, @floatFromInt(b)));
+                0.7152 * @as(f32, @floatFromInt(g)) +
+                0.0722 * @as(f32, @floatFromInt(b)));
         }
 
         self.allocator.free(self.data);
@@ -2488,10 +2767,9 @@ pub const Image = struct {
             const top_row_start = y * row_bytes;
             const bottom_row_start = (self.height - 1 - y) * row_bytes;
 
-            @memcpy(temp_row, self.data[top_row_start..top_row_start + row_bytes]);
-            @memcpy(self.data[top_row_start..top_row_start + row_bytes],
-                   self.data[bottom_row_start..bottom_row_start + row_bytes]);
-            @memcpy(self.data[bottom_row_start..bottom_row_start + row_bytes], temp_row);
+            @memcpy(temp_row, self.data[top_row_start .. top_row_start + row_bytes]);
+            @memcpy(self.data[top_row_start .. top_row_start + row_bytes], self.data[bottom_row_start .. bottom_row_start + row_bytes]);
+            @memcpy(self.data[bottom_row_start .. bottom_row_start + row_bytes], temp_row);
         }
     }
 
@@ -2795,7 +3073,6 @@ pub const Image = struct {
         self.height = new_height;
     }
 
-
     pub fn perspectiveTransform(self: *Image, corners: [4][2]f32) !void {
         // corners: [top-left, top-right, bottom-right, bottom-left]
         const bytes_per_pixel = bytesPerPixel(self.format);
@@ -2806,10 +3083,10 @@ pub const Image = struct {
 
         // Source corners (reference for future enhancement)
         _ = [4][2]f32{
-            .{ 0, 0 },                    // top-left
-            .{ src_width, 0 },           // top-right
-            .{ src_width, src_height },  // bottom-right
-            .{ 0, src_height },          // bottom-left
+            .{ 0, 0 }, // top-left
+            .{ src_width, 0 }, // top-right
+            .{ src_width, src_height }, // bottom-right
+            .{ 0, src_height }, // bottom-left
         };
 
         // Calculate output dimensions
@@ -2909,8 +3186,8 @@ pub const Image = struct {
 
                     // Bilinear interpolation
                     if (src_x >= 0 and src_x < @as(f32, @floatFromInt(self.width - 1)) and
-                        src_y >= 0 and src_y < @as(f32, @floatFromInt(self.height - 1))) {
-
+                        src_y >= 0 and src_y < @as(f32, @floatFromInt(self.height - 1)))
+                    {
                         const x1 = @as(u32, @intFromFloat(@floor(src_x)));
                         const y1 = @as(u32, @intFromFloat(@floor(src_y)));
                         const x2 = @min(x1 + 1, self.width - 1);
@@ -3171,17 +3448,29 @@ pub const Image = struct {
                 var b: f32 = 0;
 
                 if (h < 60) {
-                    r = c; g = x; b = 0;
+                    r = c;
+                    g = x;
+                    b = 0;
                 } else if (h < 120) {
-                    r = x; g = c; b = 0;
+                    r = x;
+                    g = c;
+                    b = 0;
                 } else if (h < 180) {
-                    r = 0; g = c; b = x;
+                    r = 0;
+                    g = c;
+                    b = x;
                 } else if (h < 240) {
-                    r = 0; g = x; b = c;
+                    r = 0;
+                    g = x;
+                    b = c;
                 } else if (h < 300) {
-                    r = x; g = 0; b = c;
+                    r = x;
+                    g = 0;
+                    b = c;
                 } else {
-                    r = c; g = 0; b = x;
+                    r = c;
+                    g = 0;
+                    b = x;
                 }
 
                 rgb_data[rgb_idx] = @intFromFloat((r + m) * 255.0);
@@ -3208,17 +3497,29 @@ pub const Image = struct {
             var b: f32 = 0;
 
             if (h < 60) {
-                r = c; g = x; b = 0;
+                r = c;
+                g = x;
+                b = 0;
             } else if (h < 120) {
-                r = x; g = c; b = 0;
+                r = x;
+                g = c;
+                b = 0;
             } else if (h < 180) {
-                r = 0; g = c; b = x;
+                r = 0;
+                g = c;
+                b = x;
             } else if (h < 240) {
-                r = 0; g = x; b = c;
+                r = 0;
+                g = x;
+                b = c;
             } else if (h < 300) {
-                r = x; g = 0; b = c;
+                r = x;
+                g = 0;
+                b = c;
             } else {
-                r = c; g = 0; b = x;
+                r = c;
+                g = 0;
+                b = x;
             }
 
             rgb_data[rgb_idx] = @intFromFloat((r + m) * 255.0);
@@ -3356,6 +3657,343 @@ pub const Image = struct {
         }
     }
 
+    fn saveJpeg(self: Image, path: []const u8) !void {
+        if (!(self.format == .rgb or self.format == .rgba or self.format == .grayscale)) {
+            return error.UnsupportedPixelFormat;
+        }
+
+        const padded_width = ((self.width + 7) / 8) * 8;
+        const padded_height = ((self.height + 7) / 8) * 8;
+        const plane_size = @as(usize, padded_width) * padded_height;
+
+        var y_plane = try self.allocator.alloc(u8, plane_size);
+        defer self.allocator.free(y_plane);
+
+        var cb_plane = try self.allocator.alloc(u8, plane_size);
+        defer self.allocator.free(cb_plane);
+
+        var cr_plane = try self.allocator.alloc(u8, plane_size);
+        defer self.allocator.free(cr_plane);
+
+        const has_color = self.format != .grayscale;
+
+        switch (self.format) {
+            .grayscale => {
+                for (0..padded_height) |py| {
+                    const src_y = if (py >= self.height) self.height - 1 else py;
+                    for (0..padded_width) |px| {
+                        const src_x = if (px >= self.width) self.width - 1 else px;
+                        const src_index = src_y * self.width + src_x;
+                        const dst_index = py * padded_width + px;
+                        const gray = self.data[src_index];
+                        y_plane[dst_index] = gray;
+                        cb_plane[dst_index] = 128;
+                        cr_plane[dst_index] = 128;
+                    }
+                }
+            },
+            .rgb, .rgba => {
+                const bytes_per_pixel: usize = if (self.format == .rgba) 4 else 3;
+                for (0..padded_height) |py| {
+                    const src_y = if (py >= self.height) self.height - 1 else py;
+                    for (0..padded_width) |px| {
+                        const src_x = if (px >= self.width) self.width - 1 else px;
+                        const src_index = (src_y * self.width + src_x) * bytes_per_pixel;
+                        const dst_index = py * padded_width + px;
+
+                        const r = @as(f64, @floatFromInt(self.data[src_index]));
+                        const g = @as(f64, @floatFromInt(self.data[src_index + 1]));
+                        const b = @as(f64, @floatFromInt(self.data[src_index + 2]));
+
+                        const y_val = 0.299 * r + 0.587 * g + 0.114 * b;
+                        const cb_val = -0.168736 * r - 0.331264 * g + 0.5 * b + 128.0;
+                        const cr_val = 0.5 * r - 0.418688 * g - 0.081312 * b + 128.0;
+
+                        y_plane[dst_index] = clampToByte(y_val);
+                        cb_plane[dst_index] = clampToByte(cb_val);
+                        cr_plane[dst_index] = clampToByte(cr_val);
+                    }
+                }
+            },
+            else => unreachable,
+        }
+
+        const file = try std.fs.createFileAbsolute(path, .{});
+        defer file.close();
+
+        // Write SOI
+        _ = try file.write(&[_]u8{ 0xFF, 0xD8 });
+
+        // APP0 JFIF
+        var app0: [14]u8 = undefined;
+        @memcpy(app0[0..5], "JFIF\x00");
+        app0[5] = 0x01; // major version
+        app0[6] = 0x01; // minor version
+        app0[7] = 0x00; // units
+        app0[8] = 0x00;
+        app0[9] = 0x01; // X density 1
+        app0[10] = 0x00;
+        app0[11] = 0x01; // Y density 1
+        app0[12] = 0x00; // thumbnail width
+        app0[13] = 0x00; // thumbnail height
+        try writeJpegSegment(file, 0xE0, &app0);
+
+        // DQT
+        var dqt_payload: [130]u8 = undefined;
+        var dqt_len: usize = 0;
+        dqt_payload[dqt_len] = 0x00; // table 0, 8-bit precision
+        dqt_len += 1;
+        for (zigzag_order) |zz| {
+            dqt_payload[dqt_len] = std_luma_quant.data[zz];
+            dqt_len += 1;
+        }
+        if (has_color) {
+            dqt_payload[dqt_len] = 0x01; // chroma table id 1
+            dqt_len += 1;
+            for (zigzag_order) |zz| {
+                dqt_payload[dqt_len] = std_chroma_quant.data[zz];
+                dqt_len += 1;
+            }
+        }
+        try writeJpegSegment(file, 0xDB, dqt_payload[0..dqt_len]);
+
+        // DHT
+        var dht_payload: [416]u8 = undefined;
+        var dht_len: usize = 0;
+
+        appendHuffmanTable(&dht_payload, &dht_len, 0, 0, &std_dc_luma_bits, &std_dc_luma_vals);
+        appendHuffmanTable(&dht_payload, &dht_len, 1, 0, &std_ac_luma_bits, &std_ac_luma_vals);
+        if (has_color) {
+            appendHuffmanTable(&dht_payload, &dht_len, 0, 1, &std_dc_chroma_bits, &std_dc_chroma_vals);
+            appendHuffmanTable(&dht_payload, &dht_len, 1, 1, &std_ac_chroma_bits, &std_ac_chroma_vals);
+        }
+        try writeJpegSegment(file, 0xC4, dht_payload[0..dht_len]);
+
+        // SOF0
+        var sof_payload: [19]u8 = undefined;
+        var sof_len: usize = 0;
+        sof_payload[sof_len] = 8; // precision
+        sof_len += 1;
+        sof_payload[sof_len] = @intCast((self.height >> 8) & 0xFF);
+        sof_payload[sof_len + 1] = @intCast(self.height & 0xFF);
+        sof_len += 2;
+        sof_payload[sof_len] = @intCast((self.width >> 8) & 0xFF);
+        sof_payload[sof_len + 1] = @intCast(self.width & 0xFF);
+        sof_len += 2;
+        const component_count: u8 = if (has_color) 3 else 1;
+        sof_payload[sof_len] = component_count;
+        sof_len += 1;
+
+        // Component descriptors
+        sof_payload[sof_len] = 1; // Y id
+        sof_payload[sof_len + 1] = 0x11; // sampling 1x1
+        sof_payload[sof_len + 2] = 0;
+        sof_len += 3;
+        if (has_color) {
+            sof_payload[sof_len] = 2; // Cb
+            sof_payload[sof_len + 1] = 0x11;
+            sof_payload[sof_len + 2] = 1;
+            sof_payload[sof_len + 3] = 3; // Cr
+            sof_payload[sof_len + 4] = 0x11;
+            sof_payload[sof_len + 5] = 1;
+            sof_len += 6;
+        }
+        try writeJpegSegment(file, 0xC0, sof_payload[0..sof_len]);
+
+        const dc_luma_table = buildEncodeTable(&std_dc_luma_bits, &std_dc_luma_vals);
+        const ac_luma_table = buildEncodeTable(&std_ac_luma_bits, &std_ac_luma_vals);
+        const dc_chroma_table = buildEncodeTable(&std_dc_chroma_bits, &std_dc_chroma_vals);
+        const ac_chroma_table = buildEncodeTable(&std_ac_chroma_bits, &std_ac_chroma_vals);
+
+        // SOS
+        var sos_payload: [18]u8 = undefined;
+        var sos_len: usize = 0;
+        sos_payload[sos_len] = component_count;
+        sos_len += 1;
+        sos_payload[sos_len] = 1; // Y
+        sos_payload[sos_len + 1] = 0x00; // DC table 0, AC table 0
+        sos_len += 2;
+        if (has_color) {
+            sos_payload[sos_len] = 2; // Cb
+            sos_payload[sos_len + 1] = 0x11;
+            sos_payload[sos_len + 2] = 3; // Cr
+            sos_payload[sos_len + 3] = 0x11;
+            sos_len += 4;
+        }
+        sos_payload[sos_len] = 0; // start spectral
+        sos_payload[sos_len + 1] = 63; // end spectral
+        sos_payload[sos_len + 2] = 0; // approx
+        sos_len += 3;
+        try writeJpegSegment(file, 0xDA, sos_payload[0..sos_len]);
+
+        var bit_writer = BitWriter.init(self.allocator);
+        defer bit_writer.deinit();
+
+        var prev_dc_y: i32 = 0;
+        var prev_dc_cb: i32 = 0;
+        var prev_dc_cr: i32 = 0;
+
+        for (0..padded_height / 8) |block_y| {
+            for (0..padded_width / 8) |block_x| {
+                try encodeComponentBlock(&bit_writer, y_plane, padded_width, block_x * 8, block_y * 8, &std_luma_quant.data, &prev_dc_y, &dc_luma_table, &ac_luma_table);
+                if (has_color) {
+                    try encodeComponentBlock(&bit_writer, cb_plane, padded_width, block_x * 8, block_y * 8, &std_chroma_quant.data, &prev_dc_cb, &dc_chroma_table, &ac_chroma_table);
+                    try encodeComponentBlock(&bit_writer, cr_plane, padded_width, block_x * 8, block_y * 8, &std_chroma_quant.data, &prev_dc_cr, &dc_chroma_table, &ac_chroma_table);
+                }
+            }
+        }
+
+        try bit_writer.flush();
+        if (bit_writer.buffer.items.len != 0) {
+            _ = try file.write(bit_writer.buffer.items);
+        }
+
+        // EOI
+        _ = try file.write(&[_]u8{ 0xFF, 0xD9 });
+    }
+
+    fn appendHuffmanTable(buffer: *[416]u8, length: *usize, table_class: u8, table_id: u8, bits: []const u8, values: []const u8) void {
+        buffer.*[length.*] = (table_class << 4) | table_id;
+        length.* += 1;
+        std.mem.copyForwards(u8, buffer.*[length.* .. length.* + bits.len], bits);
+        length.* += bits.len;
+        std.mem.copyForwards(u8, buffer.*[length.* .. length.* + values.len], values);
+        length.* += values.len;
+    }
+
+    fn clampToByte(value: f64) u8 {
+        const clamped = std.math.clamp(value, 0.0, 255.0);
+        return @as(u8, @intFromFloat(std.math.round(clamped)));
+    }
+
+    fn encodeComponentBlock(bit_writer: *BitWriter, plane: []const u8, stride: usize, start_x: usize, start_y: usize, quant_table: *const [64]u8, prev_dc: *i32, dc_table: *const JpegHuffmanTable, ac_table: *const JpegHuffmanTable) !void {
+        var spatial: [64]f64 = undefined;
+        for (0..8) |row| {
+            for (0..8) |col| {
+                const sample = plane[(start_y + row) * stride + start_x + col];
+                spatial[row * 8 + col] = @as(f64, @floatFromInt(sample)) - 128.0;
+            }
+        }
+
+        var freq: [64]f64 = undefined;
+        fdct8x8Forward(&spatial, &freq);
+
+        var quantized: [64]i32 = undefined;
+        for (0..64) |i| {
+            const q = @as(f64, @floatFromInt(quant_table.*[i]));
+            const value = freq[i] / q;
+            quantized[i] = @intFromFloat(std.math.round(value));
+        }
+
+        var zigzag: [64]i32 = undefined;
+        for (0..64) |i| {
+            const index = zigzag_order[i];
+            zigzag[i] = quantized[index];
+        }
+
+        try encodeQuantizedBlock(bit_writer, &zigzag, prev_dc, dc_table, ac_table);
+    }
+
+    fn encodeQuantizedBlock(bit_writer: *BitWriter, block: *const [64]i32, prev_dc: *i32, dc_table: *const JpegHuffmanTable, ac_table: *const JpegHuffmanTable) !void {
+        const dc = block[0];
+        const diff = dc - prev_dc.*;
+        prev_dc.* = dc;
+
+        const dc_mag = magnitudeBits(diff);
+        const dc_len = dc_table.code_lengths[dc_mag.size];
+        if (dc_len == 0) return error.InvalidHuffmanCode;
+        try bit_writer.writeBits(dc_table.codes[dc_mag.size], dc_len);
+        if (dc_mag.size > 0) {
+            try bit_writer.writeBits(dc_mag.bits, dc_mag.size);
+        }
+
+        var zero_run: usize = 0;
+        for (1..64) |i| {
+            const coeff = block[i];
+            if (coeff == 0) {
+                zero_run += 1;
+                continue;
+            }
+
+            while (zero_run >= 16) {
+                const len = ac_table.code_lengths[0xF0];
+                if (len == 0) return error.InvalidHuffmanCode;
+                try bit_writer.writeBits(ac_table.codes[0xF0], len);
+                zero_run -= 16;
+            }
+
+            const mag = magnitudeBits(coeff);
+            const symbol: u8 = @intCast((zero_run << 4) | mag.size);
+            const len = ac_table.code_lengths[symbol];
+            if (len == 0) return error.InvalidHuffmanCode;
+            try bit_writer.writeBits(ac_table.codes[symbol], len);
+            if (mag.size > 0) {
+                try bit_writer.writeBits(mag.bits, mag.size);
+            }
+            zero_run = 0;
+        }
+
+        if (zero_run > 0) {
+            const len = ac_table.code_lengths[0x00];
+            if (len == 0) return error.InvalidHuffmanCode;
+            try bit_writer.writeBits(ac_table.codes[0x00], len);
+        }
+    }
+
+    fn magnitudeBits(value: i32) struct { size: u8, bits: u16 } {
+        if (value == 0) {
+            return .{ .size = 0, .bits = 0 };
+        }
+
+        var abs_val = if (value < 0) -value else value;
+        var size: u8 = 0;
+        while (abs_val > 0) : (abs_val >>= 1) {
+            size += 1;
+        }
+
+        var bits: u16 = undefined;
+        if (value < 0) {
+            const shift_amount: std.math.Log2Int(i32) = @intCast(size);
+            const mask = (@as(i32, 1) << shift_amount) - 1;
+            bits = @intCast(mask + value);
+        } else {
+            bits = @intCast(value);
+        }
+
+        return .{ .size = size, .bits = bits };
+    }
+
+    fn fdct8x8Forward(input: *const [64]f64, output: *[64]f64) void {
+        const pi = std.math.pi;
+        const inv_sqrt2: f64 = 0.7071067811865476;
+        for (0..8) |u| {
+            for (0..8) |v| {
+                var sum: f64 = 0.0;
+                for (0..8) |x| {
+                    for (0..8) |y| {
+                        const sample = input[x * 8 + y];
+                        const cos_x = std.math.cos(((2.0 * @as(f64, @floatFromInt(x)) + 1.0) * @as(f64, @floatFromInt(u)) * pi) / 16.0);
+                        const cos_y = std.math.cos(((2.0 * @as(f64, @floatFromInt(y)) + 1.0) * @as(f64, @floatFromInt(v)) * pi) / 16.0);
+                        sum += sample * cos_x * cos_y;
+                    }
+                }
+                const cu = if (u == 0) inv_sqrt2 else 1.0;
+                const cv = if (v == 0) inv_sqrt2 else 1.0;
+                output[u * 8 + v] = 0.25 * cu * cv * sum;
+            }
+        }
+    }
+
+    fn writeJpegSegment(file: std.fs.File, marker: u8, payload: []const u8) !void {
+        _ = try file.write(&[_]u8{ 0xFF, marker });
+        var length_bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &length_bytes, @intCast(payload.len + 2), .big);
+        _ = try file.write(&length_bytes);
+        if (payload.len > 0) {
+            _ = try file.write(payload);
+        }
+    }
+
     fn saveBmp(self: Image, path: []const u8) !void {
         var rgb_data: []u8 = undefined;
         var needs_free = false;
@@ -3425,9 +4063,9 @@ pub const Image = struct {
         // IHDR chunk - determine color type based on image format
         const color_type: u8 = switch (self.format) {
             .rgba => 6, // RGBA
-            .rgb => 2,  // RGB
+            .rgb => 2, // RGB
             .grayscale => 0, // Grayscale
-            else => 2,  // Default to RGB
+            else => 2, // Default to RGB
         };
         const bytes_per_pixel = bytesPerPixel(self.format);
         try writePngChunk(file, "IHDR", &createIHDR(self.width, self.height, 8, color_type));
@@ -3444,8 +4082,7 @@ pub const Image = struct {
             idat_data[scanline_start] = 0; // Filter type: None
 
             const row_start = y * self.width * bytes_per_pixel;
-            @memcpy(idat_data[scanline_start + 1 .. scanline_start + 1 + self.width * bytes_per_pixel],
-                   self.data[row_start .. row_start + self.width * bytes_per_pixel]);
+            @memcpy(idat_data[scanline_start + 1 .. scanline_start + 1 + self.width * bytes_per_pixel], self.data[row_start .. row_start + self.width * bytes_per_pixel]);
         }
 
         // For simplicity, store uncompressed (real PNG would use zlib)
@@ -3518,11 +4155,11 @@ pub const Image = struct {
 
         // Dimensions (14 bits each, minus 1)
         const dimensions = (@as(u32, self.width - 1) & 0x3FFF) |
-                          ((@as(u32, self.height - 1) & 0x3FFF) << 14);
+            ((@as(u32, self.height - 1) & 0x3FFF) << 14);
         std.mem.writeInt(u32, vp8l_data[1..5], dimensions, .little);
 
         // Simple uncompressed pixel data (for MVP)
-        @memcpy(vp8l_data[5..5 + rgb_data.len], rgb_data);
+        @memcpy(vp8l_data[5 .. 5 + rgb_data.len], rgb_data);
 
         // Calculate RIFF/WebP structure
         const webp_size = 4 + 8 + vp8l_size; // WEBP + VP8L chunk
@@ -3537,8 +4174,7 @@ pub const Image = struct {
         // Write VP8L chunk
         _ = try file.write("VP8L");
         const vp8l_size_bytes = std.mem.toBytes(@as(u32, @intCast(vp8l_size)));
-        _ = try file.write(&[_]u8{ vp8l_size_bytes[0], vp8l_size_bytes[1],
-                                  vp8l_size_bytes[2], vp8l_size_bytes[3] });
+        _ = try file.write(&[_]u8{ vp8l_size_bytes[0], vp8l_size_bytes[1], vp8l_size_bytes[2], vp8l_size_bytes[3] });
         _ = try file.write(vp8l_data);
 
         // Add padding if needed
@@ -3667,10 +4303,18 @@ test "Image convertToGrayscale" {
     defer image.deinit();
 
     // Set known RGB values
-    image.data[0] = 255; image.data[1] = 0; image.data[2] = 0; // Red
-    image.data[3] = 0; image.data[4] = 255; image.data[5] = 0; // Green
-    image.data[6] = 0; image.data[7] = 0; image.data[8] = 255; // Blue
-    image.data[9] = 128; image.data[10] = 128; image.data[11] = 128; // Gray
+    image.data[0] = 255;
+    image.data[1] = 0;
+    image.data[2] = 0; // Red
+    image.data[3] = 0;
+    image.data[4] = 255;
+    image.data[5] = 0; // Green
+    image.data[6] = 0;
+    image.data[7] = 0;
+    image.data[8] = 255; // Blue
+    image.data[9] = 128;
+    image.data[10] = 128;
+    image.data[11] = 128; // Gray
 
     try image.convertToGrayscale();
     try std.testing.expect(image.format == .grayscale);
@@ -3710,14 +4354,14 @@ test "Image adjustContrast" {
     // Set test values
     image.data[0] = 128; // Should stay 128 (center point)
     image.data[1] = 178; // Should become further from center
-    image.data[2] = 78;  // Should become further from center
+    image.data[2] = 78; // Should become further from center
     image.data[3] = 200;
 
     try image.adjustContrast(1.5);
 
     try std.testing.expect(image.data[0] == 128); // Center point unchanged
     try std.testing.expect(image.data[1] > 178); // Increased contrast
-    try std.testing.expect(image.data[2] < 78);  // Increased contrast
+    try std.testing.expect(image.data[2] < 78); // Increased contrast
 }
 
 test "Image flipHorizontal" {
@@ -3762,15 +4406,21 @@ test "Image blur" {
     defer image.deinit();
 
     // Set sharp edges pattern
-    image.data[0] = 0; image.data[1] = 0; image.data[2] = 0;
-    image.data[3] = 0; image.data[4] = 255; image.data[5] = 0;
-    image.data[6] = 0; image.data[7] = 0; image.data[8] = 0;
+    image.data[0] = 0;
+    image.data[1] = 0;
+    image.data[2] = 0;
+    image.data[3] = 0;
+    image.data[4] = 255;
+    image.data[5] = 0;
+    image.data[6] = 0;
+    image.data[7] = 0;
+    image.data[8] = 0;
 
     try image.blur(1);
 
     // Center should be less bright, edges should be brighter
     try std.testing.expect(image.data[4] < 255); // Center pixel dimmed
-    try std.testing.expect(image.data[1] > 0);   // Adjacent pixels brightened
+    try std.testing.expect(image.data[1] > 0); // Adjacent pixels brightened
 }
 
 test "BMP bytesPerPixel function" {
@@ -3802,4 +4452,64 @@ test "Save validation" {
 
     // Test WebP format (now supported)
     try image.save("/tmp/test.webp", .webp);
+}
+
+test "Image load baseline JPEG" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const abs_path = try std.fs.cwd().realpathAlloc(allocator, "assets/test-images/baseline_8x8.jpg");
+    defer allocator.free(abs_path);
+
+    var image = try Image.load(allocator, abs_path);
+    defer image.deinit();
+
+    try std.testing.expectEqual(@as(u32, 8), image.width);
+    try std.testing.expectEqual(@as(u32, 8), image.height);
+    try std.testing.expectEqual(PixelFormat.rgb, image.format);
+
+    const first_pixel = image.data[0..3];
+    try std.testing.expect(first_pixel[0] >= 110 and first_pixel[0] <= 130);
+    try std.testing.expect(first_pixel[1] >= 190 and first_pixel[1] <= 210);
+    try std.testing.expect(first_pixel[2] >= 30 and first_pixel[2] <= 50);
+}
+
+test "Image save and load JPEG roundtrip" {
+    const allocator = std.testing.allocator;
+
+    var image = try Image.init(allocator, 8, 8, .rgb);
+    defer image.deinit();
+
+    for (0..image.height) |y| {
+        for (0..image.width) |x| {
+            const idx = (y * image.width + x) * 3;
+            image.data[idx] = @intCast((x * 255) / (image.width - 1));
+            image.data[idx + 1] = @intCast((y * 255) / (image.height - 1));
+            image.data[idx + 2] = 128;
+        }
+    }
+
+    const cwd = std.fs.cwd();
+    try cwd.makePath("zig-out/tests");
+    const cwd_path = try cwd.realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const abs_path = try std.fs.path.join(allocator, &[_][]const u8{ cwd_path, "zig-out", "tests", "jpeg_roundtrip.jpg" });
+    defer allocator.free(abs_path);
+
+    try image.save(abs_path, .jpeg);
+    defer std.fs.deleteFileAbsolute(abs_path) catch {};
+
+    var loaded = try Image.load(allocator, abs_path);
+    defer loaded.deinit();
+
+    try std.testing.expectEqual(image.width, loaded.width);
+    try std.testing.expectEqual(image.height, loaded.height);
+
+    for (0..loaded.data.len) |i| {
+        const orig = image.data[i];
+        const decoded = loaded.data[i];
+        const diff = if (orig > decoded) orig - decoded else decoded - orig;
+        try std.testing.expect(diff <= 20);
+    }
 }

@@ -2,6 +2,8 @@
 
 This document provides comprehensive API documentation for the zpix image processing library.
 
+> ℹ️ The consolidated and actively maintained reference lives in [`api-reference.md`](api-reference.md). This file is kept for backwards compatibility and will be merged in a future update.
+
 ## Table of Contents
 
 - [Core Types](#core-types)

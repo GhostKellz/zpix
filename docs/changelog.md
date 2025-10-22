@@ -8,9 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- CLI `pipeline` command for multi-step image processing
+- CLI `batch` runner for scripted pipelines (`.zps` files)
+- Streaming stdin/stdout helpers for convert/pipeline workflows
+- Integration tests covering CLI pipelines and format validation
 - Initial project structure and build system
 - BMP image format support (load/save)
-- PNG image format support (load only)
+- PNG image format support (load/save)
+- JPEG image format support (baseline encoder/decoder)
 - Basic image processing operations:
   - Resize with bilinear interpolation
   - Crop
@@ -24,15 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit test framework
 
 ### In Progress
-- JPEG image format support (partial implementation)
-- WebP, AVIF, TIFF, GIF, SVG format support
-- Advanced image processing filters
-- SIMD optimizations
-- Performance benchmarks
+- Enhanced WebP codec (full decode/encode)
+- TIFF multi-page and compression support
+- Metadata (EXIF/XMP/ICC) ingestion
+- Multi-threaded batch processing and progress reporting
+- Vulkan compute backend
 
 ### Planned
 - GPU acceleration support
-- Batch processing capabilities
+- Advanced batch processing (multi-threading, directory walkers)
 - Plugin system for custom operations
 - GUI interface
 - WASM compilation target

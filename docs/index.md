@@ -29,20 +29,36 @@ zpix is a modern, memory-safe image processing library that serves as a replacem
 - **Comprehensive API**: Load, process, and save images with a clean interface
 - **Self-Contained**: No external dependencies, pure Zig implementation
 
-### Supported Formats (MVP)
+### Supported Formats (Current)
 
-- **BMP**: Full load/save support for 24-bit RGB
-- **PNG**: Load support for 8-bit RGB images
-- **JPEG**: Detection and partial decoding framework
+- **BMP**: Full load/save for 24-bit RGB & grayscale
+- **PNG**: Load/save for 8-bit RGB/RGBA (non-interlaced)
+- **JPEG**: Baseline decoder & encoder (no progressive yet)
+- **WebP**: Experimental placeholder codec for MVP validation
+- **AVIF**: AV1-based decoder (decode only)
+- **TIFF**: Uncompressed 8-bit RGB/RGBA/Grayscale
+- **GIF**: Palette decoding (first frame) plus animation reader
+- **SVG**: Rasterizes basic SVG shapes into RGB images
 
 ### Available Operations
 
-- **Resize**: High-quality bilinear interpolation
+- **Resize**: SIMD-accelerated bilinear interpolation
 - **Crop**: Rectangular region extraction
-- **Rotate**: 90°, 180°, 270° rotations
+- **Rotate**: 90°, 180°, 270°, and arbitrary-angle rotations
+- **Flip**: Horizontal and vertical mirroring
 - **Brightness**: Adjustable intensity control
 - **Contrast**: Factor-based adjustment
 - **Blur**: Box blur with configurable radius
+- **Grayscale**: Luminance conversion from RGB
+- **Color Transforms**: RGB ↔ HSV, RGB ↔ YUV conversions
+
+### CLI & Automation
+
+- `zpix convert` for one-off format conversions (stdin/stdout aware)
+- `zpix pipeline` to chain operations (e.g. `resize`, `blur`, `format`, `save`)
+- `zpix batch` to execute multiple pipelines from `.zps` scripts
+- Streaming helpers for piping data through stdin/stdout without temp files
+- `zig build test` runs both library and CLI regression suites
 
 ## 🤝 Contributing
 

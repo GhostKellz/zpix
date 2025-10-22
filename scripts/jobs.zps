@@ -1,0 +1,11 @@
+# Sample zpix batch script demonstrating job-based syntax
+# Each job line is key=value pairs controlling a batch execution.
+
+# Generate thumbnails for BMP gallery assets and save PNGs with progress output
+job operation=resize inputs=assets/gallery/*.bmp output=zig-out/tmp/thumbs width=256 height=256 threads=4 progress=true overwrite=true
+
+# Convert a directory of JPEG captures to PNG while flattening folder structure
+job operation=convert_format inputs=assets/captures output=zig-out/tmp/captures format=png recursive=true preserve_structure=false
+
+# Apply a subtle warm white balance tint to a single portrait
+job operation=white_balance input=assets/portraits/portrait.bmp output=zig-out/tmp/portraits temperature=0.15 tint=0.02 overwrite=true

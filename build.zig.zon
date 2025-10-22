@@ -34,11 +34,11 @@
     .dependencies = .{
         .flash = .{
             .url = "https://github.com/ghostkellz/flash/archive/refs/heads/main.tar.gz",
-            .hash = "flash-0.2.4-dnj73-p7BQAfNq4cL_oklPQOaNDwVih2JNa4t4dVtJ-K",
+            .hash = "flash-0.3.1-dnj737SSBQBgVOHiNFHpXWrFth7PyGxCgfkmlBYtZz5S",
         },
         .flare = .{
             .url = "https://github.com/ghostkellz/flare/archive/refs/heads/main.tar.gz",
-            .hash = "flare-0.0.0-NK4JaX9eAQCgRuIiDBZr6uSz8D2DhSeeWswotvCbUeG_",
+            .hash = "flare-0.1.0-NK4JafGMAQA8xE2ah8YBxO74sOkWrsQYTkWQ64D1PJVg",
         },
     },
     .paths = .{

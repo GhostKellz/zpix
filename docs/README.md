@@ -55,37 +55,40 @@ try image.save("output.bmp", .bmp);
 ### CLI Usage
 ```bash
 # Convert formats
-zig build run -- convert input.png output.bmp
+zig build run -- convert input.png output.jpeg
 
-# Run tests
-zig build run -- test
+# Run a multi-step pipeline
+zig build run -- pipeline photo.png resize:1024x768 blur:2 format:png save:processed.png
 
-# Performance benchmarks
+# Execute scripted pipelines
+zig build run -- batch scripts/jobs.zps
+
+# Tests & benchmarks
+zig build test
 zig build run -- benchmark
 ```
 
 ## Current Status (v0.1.0 Beta)
 
 ### ✅ Completed Features
-- **Core Image Operations**: Create, load, save, resize, rotate, crop
-- **Format Support**: BMP (full), PNG (with alpha), WebP (basic), JPEG (partial)
-- **Processing**: Brightness, contrast, blur operations
-- **Performance**: Comprehensive benchmarking system
-- **Memory Management**: Efficient allocation tracking
-- **CLI Tools**: Convert, test, and benchmark commands
+- **Core Image Operations**: Create, load, save, resize, rotate (arbitrary), crop, flip
+- **Format Support**: BMP & PNG (load/save), JPEG baseline encoder/decoder, TIFF (uncompressed), GIF (palette), AVIF decoder, SVG rasterizer, experimental WebP codec
+- **Processing Pipeline**: Brightness, contrast, blur, grayscale, color-space conversions
+- **CLI Tooling**: `convert`, `pipeline`, `batch`, `test`, and `benchmark` commands with streaming I/O support
+- **Performance & Memory**: SIMD-enabled resize/blur, controlled allocations, benchmark suite
+- **Documentation & Tests**: Comprehensive docs, examples, and automated tests via `zig build test`
 
 ### 🔄 In Development
-- **Enhanced PNG**: Performance optimizations
-- **WebP**: Complete lossy and lossless support
-- **TIFF**: Basic loading support
-- **SIMD**: Vectorized operations for better performance
+- Production-ready WebP codec (full lossy/lossless)
+- Multi-threaded batch processing with directory walkers & progress reporting
+- Metadata ingestion (EXIF, XMP, ICC profiles)
+- Vulkan compute backend and extended GPU acceleration
 
 ### 📋 Planned Features
-- **More Formats**: GIF, AVIF, SVG, RAW support
-- **Advanced Processing**: Color correction, filters, transformations
-- **Metadata**: EXIF, XMP, IPTC support
-- **GPU Acceleration**: OpenCL and Vulkan backends
-- **Language Bindings**: C API, Python, JavaScript, Rust
+- Advanced filters and tone-mapping workflows
+- Plugin architecture for custom formats/operations
+- Language bindings (C API, Python, WASM, Rust)
+- AI-powered enhancements (super-resolution, content-aware scaling)
 
 ## Contributing
 
